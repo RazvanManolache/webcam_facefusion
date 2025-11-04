@@ -1,0 +1,48 @@
+{
+  "swap_mode": "none",
+  "deep_swapper_model": "iperov/james_carrey_224",
+  "face_swapper_model": "blendswap_256",
+  "face_swapper_pixel_boost": "256x256",
+  "face_swapper_weight": 0.5,
+  "expression_restorer_enabled": false,
+  "age_modifier_enabled": false,
+  "face_editor_enabled": false,
+  "face_debugger_enabled": true,
+  "lip_syncer_enabled": false,
+  "frame_colorizer_model": "ddcolor",
+  "frame_colorizer_size": "192x192",
+  "frame_colorizer_blend": 100,
+  "expression_restorer_model": "live_portrait",
+  "expression_restorer_factor": 80,
+  "expression_restorer_areas": [
+    "upper-face",
+    "lower-face"
+  ],
+  "age_modifier_model": "styleganex_age",
+  "age_modifier_direction": 0,
+  "face_editor_model": "live_portrait",
+  "face_editor_eyebrow_direction": 0.0,
+  "face_editor_eye_gaze_horizontal": 0.0,
+  "face_editor_eye_gaze_vertical": 0.0,
+  "face_editor_eye_open_ratio": 0.0,
+  "face_editor_lip_open_ratio": 0.0,
+  "face_editor_mouth_smile": 0.0,
+  "face_editor_mouth_grim": 0.0,
+  "face_editor_mouth_pout": 0.0,
+  "face_editor_mouth_purse": 0.0,
+  "face_editor_mouth_position_horizontal": 0.0,
+  "face_editor_mouth_position_vertical": 0.0,
+  "face_editor_head_pitch": 0.0,
+  "face_editor_head_yaw": 0.0,
+  "face_editor_head_roll": 0.0,
+  "lip_syncer_model": "edtalk_256",
+  "lip_syncer_weight": 0.5,
+  "execution_providers": [
+    "cuda"
+  ],
+  "execution_device_ids": [
+    "0"
+  ],
+  "video_memory_strategy": "moderate",
+  "fast_startup": true
+}

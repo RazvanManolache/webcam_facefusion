@@ -21,6 +21,8 @@ import logging
 import onnxruntime as ort
 import gc
 from concurrent.futures import ThreadPoolExecutor, Future
+import json
+import shutil
 
 from facefusion import state_manager
 from facefusion.types import VisionFrame
@@ -64,6 +66,56 @@ if not LOGGER.handlers:
 
 
 _models_downloaded = False
+
+# Simple preferences store
+PREFS_PATH = os.path.join(BASE_DIR, 'user_prefs.json')
+_prefs_cache = None
+
+def _load_prefs() -> dict:
+    global _prefs_cache
+    try:
+        with open(PREFS_PATH, 'r', encoding='utf-8') as f:
+            _prefs_cache = json.load(f) or {}
+    except Exception:
+        _prefs_cache = {}
+    return _prefs_cache
+
+def _save_prefs(prefs: dict) -> None:
+    global _prefs_cache
+    try:
+        with open(PREFS_PATH, 'w', encoding='utf-8') as f:
+            json.dump(prefs, f, indent=2)
+        _prefs_cache = dict(prefs)
+    except Exception:
+        pass
+
+def _get_pref(key: str, default):
+    return _load_prefs().get(key, default)
+
+def _persist_state() -> None:
+    try:
+        prefs = _load_prefs().copy()
+        # Collect a curated set of keys to persist
+        keys = [
+            'swap_mode','deep_swapper_model','morph',
+            'face_swapper_model','face_swapper_pixel_boost','face_swapper_weight','source_paths',
+            'colorizer_enabled','expression_restorer_enabled','age_modifier_enabled','face_editor_enabled','face_debugger_enabled','lip_syncer_enabled',
+            'frame_colorizer_model','frame_colorizer_size','frame_colorizer_blend',
+            'expression_restorer_model','expression_restorer_factor','expression_restorer_areas',
+            'age_modifier_model','age_modifier_direction',
+            'face_editor_model','face_editor_eyebrow_direction','face_editor_eye_gaze_horizontal','face_editor_eye_gaze_vertical','face_editor_eye_open_ratio','face_editor_lip_open_ratio','face_editor_mouth_smile','face_editor_mouth_grim','face_editor_mouth_pout','face_editor_mouth_purse','face_editor_mouth_position_horizontal','face_editor_mouth_position_vertical','face_editor_head_pitch','face_editor_head_yaw','face_editor_head_roll',
+            'lip_syncer_model','lip_syncer_weight',
+            'execution_providers','execution_device_ids','video_memory_strategy',
+            'detector_model','detector_size','detector_score','landmarker_model','landmarker_score','selector_mode','auto_fallback',
+            'show_overlay','debug_logs','show_boxes','show_native','fast_startup'
+        ]
+        for k in keys:
+            v = state_manager.get_item(k)
+            if v is not None:
+                prefs[k] = v
+        _save_prefs(prefs)
+    except Exception:
+        pass
 
 # Default fast startup to True to avoid redundant pre_check when models are present
 try:
@@ -1231,6 +1283,10 @@ def gr_stream(
             use_occlusion,
             selector_mode,
         )
+        try:
+            _persist_state()
+        except Exception:
+            pass
         # Swap mode & face swapper setup
         try:
             state_manager.set_item("swap_mode", swap_mode or 'deep')
@@ -1585,68 +1641,73 @@ def main() -> None:
             with gr.Row():
                 # Execution provider & device selection
                 ep_keys = _available_execution_provider_keys()
-                # prefer cuda if available
-                ep_default = 'cuda' if 'cuda' in ep_keys else ('directml' if 'directml' in ep_keys else 'cpu')
-                exec_provider = gr.Dropdown(choices=ep_keys, value=ep_default, label="Execution Provider")
-                exec_device = gr.Textbox(value="0", label="Execution Device ID")
-                video_mem = gr.Dropdown(choices=["strict","moderate","relaxed"], value="moderate", label="Video Memory Strategy")
+                # default from prefs; fall back to available set
+                pref_ep = (_get_pref('execution_providers', ['cpu']) or ['cpu'])[0]
+                if pref_ep not in ep_keys:
+                    pref_ep = 'cuda' if 'cuda' in ep_keys else ('directml' if 'directml' in ep_keys else 'cpu')
+                exec_provider = gr.Dropdown(choices=ep_keys, value=pref_ep, label="Execution Provider")
+                pref_dev = (_get_pref('execution_device_ids', ['0']) or ['0'])[0]
+                exec_device = gr.Textbox(value=str(pref_dev), label="Execution Device ID")
+                video_mem = gr.Dropdown(choices=["strict","moderate","relaxed"], value=_get_pref('video_memory_strategy', "moderate"), label="Video Memory Strategy")
                 shutdown_btn = gr.Button("Shutdown App", variant="stop")
+                fast_startup = gr.Checkbox(value=bool(_get_pref('fast_startup', True)), label="Fast Startup (skip model checks)")
             with gr.Tabs():
                 with gr.Tab("Swapping"):
                     with gr.Row("Face Swapper"):
-                        swap_mode = gr.Dropdown(choices=["none","deep","face"], value="deep", label="Swap Mode")
+                        swap_mode = gr.Dropdown(choices=["none","deep","face"], value=_get_pref('swap_mode', "deep"), label="Swap Mode")
                         source_files = gr.Files(label="Source Photos (for Face Swapper)", file_types=["image"], type="filepath")
                     with gr.Row():
-                        fs_model = gr.Dropdown(choices=face_swapper_models, value=(face_swapper_models[0] if face_swapper_models else None), label="Face Swapper Model")
-                        fs_pixel = gr.Dropdown(choices=proc_choices.face_swapper_set.get((face_swapper_models[0] if face_swapper_models else 'inswapper_128'), ["256x256"]) , value=(proc_choices.face_swapper_set.get((face_swapper_models[0] if face_swapper_models else 'inswapper_128'), ["256x256"]) [0]), label="Face Swapper Pixel Boost")
-                        fs_weight = gr.Slider(minimum=0.0, maximum=1.0, step=0.05, value=0.5, label="Face Swapper Weight")
+                        fs_model = gr.Dropdown(choices=face_swapper_models, value=_get_pref('face_swapper_model', (face_swapper_models[0] if face_swapper_models else None)), label="Face Swapper Model")
+                        fs_pixel_default = proc_choices.face_swapper_set.get((fs_model.value if fs_model.value else 'inswapper_128'), ["256x256"]) or ["256x256"]
+                        fs_pixel = gr.Dropdown(choices=fs_pixel_default , value=_get_pref('face_swapper_pixel_boost', fs_pixel_default[0]), label="Face Swapper Pixel Boost")
+                        fs_weight = gr.Slider(minimum=0.0, maximum=1.0, step=0.05, value=float(_get_pref('face_swapper_weight', 0.5)), label="Face Swapper Weight")
                     with gr.Row():
-                        ds_model = gr.Dropdown(choices=deep_models, value="iperov/james_carrey_224", label="Deep Swapper Model")
-                        morph = gr.Slider(minimum=0, maximum=100, step=1, value=args.morph, label="Morph")
+                        ds_model = gr.Dropdown(choices=deep_models, value=_get_pref('deep_swapper_model', "iperov/james_carrey_224"), label="Deep Swapper Model")
+                        morph = gr.Slider(minimum=0, maximum=100, step=1, value=int(_get_pref('morph', args.morph)), label="Morph")
                     
                 with gr.Tab("Camera"):
                     with gr.Row():
-                        backend = gr.Dropdown(choices=list(BACKEND_MAP.keys()), value="Media Foundation", label="Backend")
-                        cam_choices = get_camera_choices(5, backend_name="Auto")
-                        camera = gr.Dropdown(choices=cam_choices, value=(cam_choices[0] if cam_choices else f"[{args.camera}] Camera {args.camera}"), label="Camera")
+                        backend = gr.Dropdown(choices=list(BACKEND_MAP.keys()), value=_get_pref('backend', "Media Foundation"), label="Backend")
+                        cam_choices = get_camera_choices(5, backend_name=_get_pref('backend', "Auto"))
+                        camera = gr.Dropdown(choices=cam_choices, value=_get_pref('camera_choice', (cam_choices[0] if cam_choices else f"[{args.camera}] Camera {args.camera}")), label="Camera")
                         res_presets = ["640x480", "1280x720", "1920x1080", "Custom"]
-                        res = gr.Dropdown(choices=res_presets, value="1280x720", label="Resolution")
-                        width = gr.Number(value=args.width, label="Width", precision=0)
-                        height = gr.Number(value=args.height, label="Height", precision=0)
-                        fps = gr.Slider(minimum=5, maximum=60, step=1, value=5, label="Target FPS")
+                        res = gr.Dropdown(choices=res_presets, value=_get_pref('resolution_preset', "1280x720"), label="Resolution")
+                        width = gr.Number(value=int(_get_pref('width', args.width)), label="Width", precision=0)
+                        height = gr.Number(value=int(_get_pref('height', args.height)), label="Height", precision=0)
+                        fps = gr.Slider(minimum=5, maximum=60, step=1, value=float(_get_pref('fps', 15)), label="Target FPS")
                         
                     with gr.Row():
                         dshow_names = _ffmpeg_camera_names()
-                        dshow_name_drop = gr.Dropdown(choices=dshow_names, value=(dshow_names[0] if dshow_names else None), label="DirectShow device name")
-                        dshow_name = gr.Textbox(value="", label="DShow name (manual)")
+                        dshow_name_drop = gr.Dropdown(choices=dshow_names, value=_get_pref('dshow_name_device', (dshow_names[0] if dshow_names else None)), label="DirectShow device name")
+                        dshow_name = gr.Textbox(value=_get_pref('dshow_name_text', ""), label="DShow name (manual)")
                         refresh_btn = gr.Button("Refresh Cameras")                        
                     with gr.Row():
-                        convert_rgb = gr.Checkbox(value=True, label="Convert RGB in driver")
-                        force_fourcc = gr.Dropdown(choices=["Auto","MJPG","YUY2","H264","NV12"], value="Auto", label="Force FOURCC")
-                        retry_black = gr.Slider(minimum=0, maximum=10, step=1, value=3, label="Retry on black frames")
-                        gentle_mode = gr.Checkbox(value=True, label="Gentle Mode (minimize camera re-inits)")
-                        auto_repair = gr.Checkbox(value=True, label="Auto-repair capture (try formats/backend)")
-                        color_mode = gr.Dropdown(choices=["Auto (BGR->RGB)", "Assume RGB (no swap)",], value="Auto (BGR->RGB)", label="Color mode")
+                        convert_rgb = gr.Checkbox(value=bool(_get_pref('convert_rgb', True)), label="Convert RGB in driver")
+                        force_fourcc = gr.Dropdown(choices=["Auto","MJPG","YUY2","H264","NV12"], value=_get_pref('force_fourcc', "Auto"), label="Force FOURCC")
+                        retry_black = gr.Slider(minimum=0, maximum=10, step=1, value=int(_get_pref('retry_black', 3)), label="Retry on black frames")
+                        gentle_mode = gr.Checkbox(value=bool(_get_pref('gentle_mode', True)), label="Gentle Mode (minimize camera re-inits)")
+                        auto_repair = gr.Checkbox(value=bool(_get_pref('auto_repair', True)), label="Auto-repair capture (try formats/backend)")
+                        color_mode = gr.Dropdown(choices=["Auto (BGR->RGB)", "Assume RGB (no swap)",], value=_get_pref('color_mode', "Auto (BGR->RGB)"), label="Color mode")
                     with gr.Row():
-                        lock_exposure = gr.Checkbox(value=True, label="Lock Exposure")
-                        exposure_value = gr.Slider(minimum=-13.0, maximum=-1.0, step=0.5, value=-6.0, label="Exposure (log scale)")
-                        lock_wb = gr.Checkbox(value=True, label="Lock White Balance")
-                        wb_temperature = gr.Slider(minimum=2800, maximum=6500, step=100, value=4500, label="WB Temperature (K)")
-                        show_overlay = gr.Checkbox(value=False, label="Show detection overlay")
-                        debug_logs = gr.Checkbox(value=True, label="Debug logs to console")
-                        show_boxes = gr.Checkbox(value=False, label="Show detection boxes")
-                        fast_startup = gr.Checkbox(value=True, label="Fast Startup (skip model checks)")
+                        lock_exposure = gr.Checkbox(value=bool(_get_pref('lock_exposure', True)), label="Lock Exposure")
+                        exposure_value = gr.Slider(minimum=-13.0, maximum=-1.0, step=0.5, value=float(_get_pref('exposure_value', -6.0)), label="Exposure (log scale)")
+                        lock_wb = gr.Checkbox(value=bool(_get_pref('lock_wb', True)), label="Lock White Balance")
+                        wb_temperature = gr.Slider(minimum=2800, maximum=6500, step=100, value=int(_get_pref('wb_temperature', 4500)), label="WB Temperature (K)")
+                        show_overlay = gr.Checkbox(value=bool(_get_pref('show_overlay', False)), label="Show detection overlay")
+                        debug_logs = gr.Checkbox(value=bool(_get_pref('debug_logs', True)), label="Debug logs to console")
+                        show_boxes = gr.Checkbox(value=bool(_get_pref('show_boxes', False)), label="Show detection boxes")
+                        
            
                 with gr.Tab("Detection"):
                     with gr.Row():
-                        d_model = gr.Dropdown(choices=detector_models, value="retinaface", label="Detector Model")
-                        d_size = gr.Dropdown(choices=detector_sizes_map.get("retinaface", ["640x640"]), value=detector_sizes_map.get("retinaface", ["640x640"])[0], label="Detector Size")
-                        d_score = gr.Slider(minimum=0.0, maximum=1.0, step=0.05, value=0.5, label="Detector Score")
-                        selector_mode_dd = gr.Dropdown(choices=ff_choices.face_selector_modes, value="one", label="Selector Mode")
-                        auto_fallback = gr.Checkbox(value=True, label="Auto fallback detector if no faces")
+                        d_model = gr.Dropdown(choices=detector_models, value=_get_pref('detector_model', "retinaface"), label="Detector Model")
+                        d_size = gr.Dropdown(choices=detector_sizes_map.get("retinaface", ["640x640"]), value=_get_pref('detector_size', detector_sizes_map.get("retinaface", ["640x640"])[0]), label="Detector Size")
+                        d_score = gr.Slider(minimum=0.0, maximum=1.0, step=0.05, value=float(_get_pref('detector_score', 0.5)), label="Detector Score")
+                        selector_mode_dd = gr.Dropdown(choices=ff_choices.face_selector_modes, value=_get_pref('selector_mode', "one"), label="Selector Mode")
+                        auto_fallback = gr.Checkbox(value=bool(_get_pref('auto_fallback', True)), label="Auto fallback detector if no faces")
                     with gr.Row():
-                        l_model = gr.Dropdown(choices=landmarker_models, value="many", label="Landmarker Model")
-                        l_score = gr.Slider(minimum=0.0, maximum=1.0, step=0.05, value=0.5, label="Landmarker Score")
+                        l_model = gr.Dropdown(choices=landmarker_models, value=_get_pref('landmarker_model', "many"), label="Landmarker Model")
+                        l_score = gr.Slider(minimum=0.0, maximum=1.0, step=0.05, value=float(_get_pref('landmarker_score', 0.5)), label="Landmarker Score")
                     with gr.Row():
                         o_model = gr.Dropdown(choices=occluder_models, value="xseg_2", label="Occluder Model")
                         p_model = gr.Dropdown(choices=parser_models, value=(parser_models[0] if parser_models else None), label="Parser Model")
@@ -1654,60 +1715,60 @@ def main() -> None:
                 
                 with gr.Tab("Enhancing"):
                     with gr.Row():
-                        face_enh_enabled = gr.Checkbox(value=False, label="Enable Face Enhancer")
-                        face_enh_model = gr.Dropdown(choices=face_enhancer_models, value=("gfpgan_1.4" if "gfpgan_1.4" in face_enhancer_models else (face_enhancer_models[0] if face_enhancer_models else None)), label="Face Enhancer Model")
-                        face_enh_blend = gr.Slider(minimum=0, maximum=100, step=1, value=80, label="Face Enhancer Blend")
-                        face_enh_weight = gr.Slider(minimum=0.0, maximum=1.0, step=0.05, value=0.5, label="Face Enhancer Weight")
+                        face_enh_enabled = gr.Checkbox(value=bool(_get_pref('face_enhancer_enabled', False)), label="Enable Face Enhancer")
+                        face_enh_model = gr.Dropdown(choices=face_enhancer_models, value=_get_pref('face_enhancer_model', ("gfpgan_1.4" if "gfpgan_1.4" in face_enhancer_models else (face_enhancer_models[0] if face_enhancer_models else None))), label="Face Enhancer Model")
+                        face_enh_blend = gr.Slider(minimum=0, maximum=100, step=1, value=int(_get_pref('face_enhancer_blend', 80)), label="Face Enhancer Blend")
+                        face_enh_weight = gr.Slider(minimum=0.0, maximum=1.0, step=0.05, value=float(_get_pref('face_enhancer_weight', 0.5)), label="Face Enhancer Weight")
                     with gr.Row():
-                        frame_enh_enabled = gr.Checkbox(value=False, label="Enable Frame Enhancer")
-                        frame_enh_model = gr.Dropdown(choices=frame_enhancer_models, value=("span_kendata_x4" if "span_kendata_x4" in frame_enhancer_models else (frame_enhancer_models[0] if frame_enhancer_models else None)), label="Frame Enhancer Model")
-                        frame_enh_blend = gr.Slider(minimum=0, maximum=100, step=1, value=80, label="Frame Enhancer Blend")
+                        frame_enh_enabled = gr.Checkbox(value=bool(_get_pref('frame_enhancer_enabled', False)), label="Enable Frame Enhancer")
+                        frame_enh_model = gr.Dropdown(choices=frame_enhancer_models, value=_get_pref('frame_enhancer_model', ("span_kendata_x4" if "span_kendata_x4" in frame_enhancer_models else (frame_enhancer_models[0] if frame_enhancer_models else None))), label="Frame Enhancer Model")
+                        frame_enh_blend = gr.Slider(minimum=0, maximum=100, step=1, value=int(_get_pref('frame_enhancer_blend', 80)), label="Frame Enhancer Blend")
                     with gr.Row():
-                        enhance_async = gr.Checkbox(value=True, label="Async Enhance (background enhancers)")
+                        enhance_async = gr.Checkbox(value=bool(_get_pref('enhance_async', True)), label="Async Enhance (background enhancers)")
                 with gr.Tab("Processors"):
                     with gr.Row():
-                        colorizer_enabled = gr.Checkbox(value=False, label="Enable Frame Colorizer")
-                        colorizer_model = gr.Dropdown(choices=frame_colorizer_choices.frame_colorizer_models, value=(frame_colorizer_choices.frame_colorizer_models[0] if frame_colorizer_choices.frame_colorizer_models else None), label="Colorizer Model")
-                        colorizer_size = gr.Dropdown(choices=frame_colorizer_choices.frame_colorizer_sizes, value=(frame_colorizer_choices.frame_colorizer_sizes[0] if frame_colorizer_choices.frame_colorizer_sizes else None), label="Colorizer Size")
-                        colorizer_blend = gr.Slider(minimum=min(frame_colorizer_choices.frame_colorizer_blend_range), maximum=max(frame_colorizer_choices.frame_colorizer_blend_range), step=1, value=100, label="Colorizer Blend")
+                        colorizer_enabled = gr.Checkbox(value=bool(_get_pref('frame_colorizer_enabled', False)), label="Enable Frame Colorizer")
+                        colorizer_model = gr.Dropdown(choices=frame_colorizer_choices.frame_colorizer_models, value=_get_pref('frame_colorizer_model', (frame_colorizer_choices.frame_colorizer_models[0] if frame_colorizer_choices.frame_colorizer_models else None)), label="Colorizer Model")
+                        colorizer_size = gr.Dropdown(choices=frame_colorizer_choices.frame_colorizer_sizes, value=_get_pref('frame_colorizer_size', (frame_colorizer_choices.frame_colorizer_sizes[0] if frame_colorizer_choices.frame_colorizer_sizes else None)), label="Colorizer Size")
+                        colorizer_blend = gr.Slider(minimum=min(frame_colorizer_choices.frame_colorizer_blend_range), maximum=max(frame_colorizer_choices.frame_colorizer_blend_range), step=1, value=int(_get_pref('frame_colorizer_blend', 100)), label="Colorizer Blend")
                     with gr.Row():
-                        expr_enabled = gr.Checkbox(value=False, label="Enable Expression Restorer")
-                        expr_model = gr.Dropdown(choices=expression_restorer_choices.expression_restorer_models, value=(expression_restorer_choices.expression_restorer_models[0] if expression_restorer_choices.expression_restorer_models else None), label="Expr Model")
-                        expr_factor = gr.Slider(minimum=min(expression_restorer_choices.expression_restorer_factor_range), maximum=max(expression_restorer_choices.expression_restorer_factor_range), step=1, value=80, label="Expr Factor")
-                        expr_areas = gr.CheckboxGroup(choices=expression_restorer_choices.expression_restorer_areas, value=expression_restorer_choices.expression_restorer_areas, label="Expr Areas")
+                        expr_enabled = gr.Checkbox(value=bool(_get_pref('expression_restorer_enabled', False)), label="Enable Expression Restorer")
+                        expr_model = gr.Dropdown(choices=expression_restorer_choices.expression_restorer_models, value=_get_pref('expression_restorer_model', (expression_restorer_choices.expression_restorer_models[0] if expression_restorer_choices.expression_restorer_models else None)), label="Expr Model")
+                        expr_factor = gr.Slider(minimum=min(expression_restorer_choices.expression_restorer_factor_range), maximum=max(expression_restorer_choices.expression_restorer_factor_range), step=1, value=int(_get_pref('expression_restorer_factor', 80)), label="Expr Factor")
+                        expr_areas = gr.CheckboxGroup(choices=expression_restorer_choices.expression_restorer_areas, value=_get_pref('expression_restorer_areas', expression_restorer_choices.expression_restorer_areas), label="Expr Areas")
                     with gr.Row():
-                        age_enabled = gr.Checkbox(value=False, label="Enable Age Modifier")
-                        age_model = gr.Dropdown(choices=age_modifier_choices.age_modifier_models, value=(age_modifier_choices.age_modifier_models[0] if age_modifier_choices.age_modifier_models else None), label="Age Model")
-                        age_direction = gr.Slider(minimum=min(age_modifier_choices.age_modifier_direction_range), maximum=max(age_modifier_choices.age_modifier_direction_range), step=1, value=0, label="Age Direction")
+                        age_enabled = gr.Checkbox(value=bool(_get_pref('age_modifier_enabled', False)), label="Enable Age Modifier")
+                        age_model = gr.Dropdown(choices=age_modifier_choices.age_modifier_models, value=_get_pref('age_modifier_model', (age_modifier_choices.age_modifier_models[0] if age_modifier_choices.age_modifier_models else None)), label="Age Model")
+                        age_direction = gr.Slider(minimum=min(age_modifier_choices.age_modifier_direction_range), maximum=max(age_modifier_choices.age_modifier_direction_range), step=1, value=int(_get_pref('age_modifier_direction', 0)), label="Age Direction")
                     with gr.Row():
-                        editor_enabled = gr.Checkbox(value=False, label="Enable Face Editor")
-                        editor_model = gr.Dropdown(choices=face_editor_choices.face_editor_models, value=(face_editor_choices.face_editor_models[0] if face_editor_choices.face_editor_models else None), label="Editor Model")
+                        editor_enabled = gr.Checkbox(value=bool(_get_pref('face_editor_enabled', False)), label="Enable Face Editor")
+                        editor_model = gr.Dropdown(choices=face_editor_choices.face_editor_models, value=_get_pref('face_editor_model', (face_editor_choices.face_editor_models[0] if face_editor_choices.face_editor_models else None)), label="Editor Model")
                     with gr.Row():
-                        fe_eyebrow_dir = gr.Slider(minimum=min(face_editor_choices.face_editor_eyebrow_direction_range), maximum=max(face_editor_choices.face_editor_eyebrow_direction_range), step=0.1, value=0.0, label="Eyebrow Direction")
-                        fe_eye_h = gr.Slider(minimum=min(face_editor_choices.face_editor_eye_gaze_horizontal_range), maximum=max(face_editor_choices.face_editor_eye_gaze_horizontal_range), step=0.1, value=0.0, label="Eye Gaze H")
-                        fe_eye_v = gr.Slider(minimum=min(face_editor_choices.face_editor_eye_gaze_vertical_range), maximum=max(face_editor_choices.face_editor_eye_gaze_vertical_range), step=0.1, value=0.0, label="Eye Gaze V")
-                        fe_eye_open = gr.Slider(minimum=min(face_editor_choices.face_editor_eye_open_ratio_range), maximum=max(face_editor_choices.face_editor_eye_open_ratio_range), step=0.1, value=0.0, label="Eye Open")
+                        fe_eyebrow_dir = gr.Slider(minimum=min(face_editor_choices.face_editor_eyebrow_direction_range), maximum=max(face_editor_choices.face_editor_eyebrow_direction_range), step=0.1, value=float(_get_pref('face_editor_eyebrow_direction', 0.0)), label="Eyebrow Direction")
+                        fe_eye_h = gr.Slider(minimum=min(face_editor_choices.face_editor_eye_gaze_horizontal_range), maximum=max(face_editor_choices.face_editor_eye_gaze_horizontal_range), step=0.1, value=float(_get_pref('face_editor_eye_gaze_horizontal', 0.0)), label="Eye Gaze H")
+                        fe_eye_v = gr.Slider(minimum=min(face_editor_choices.face_editor_eye_gaze_vertical_range), maximum=max(face_editor_choices.face_editor_eye_gaze_vertical_range), step=0.1, value=float(_get_pref('face_editor_eye_gaze_vertical', 0.0)), label="Eye Gaze V")
+                        fe_eye_open = gr.Slider(minimum=min(face_editor_choices.face_editor_eye_open_ratio_range), maximum=max(face_editor_choices.face_editor_eye_open_ratio_range), step=0.1, value=float(_get_pref('face_editor_eye_open_ratio', 0.0)), label="Eye Open")
                     with gr.Row():
-                        fe_lip_open = gr.Slider(minimum=min(face_editor_choices.face_editor_lip_open_ratio_range), maximum=max(face_editor_choices.face_editor_lip_open_ratio_range), step=0.1, value=0.0, label="Lip Open")
-                        fe_mouth_smile = gr.Slider(minimum=min(face_editor_choices.face_editor_mouth_smile_range), maximum=max(face_editor_choices.face_editor_mouth_smile_range), step=0.1, value=0.0, label="Smile")
-                        fe_head_pitch = gr.Slider(minimum=min(face_editor_choices.face_editor_head_pitch_range), maximum=max(face_editor_choices.face_editor_head_pitch_range), step=0.1, value=0.0, label="Head Pitch")
+                        fe_lip_open = gr.Slider(minimum=min(face_editor_choices.face_editor_lip_open_ratio_range), maximum=max(face_editor_choices.face_editor_lip_open_ratio_range), step=0.1, value=float(_get_pref('face_editor_lip_open_ratio', 0.0)), label="Lip Open")
+                        fe_mouth_smile = gr.Slider(minimum=min(face_editor_choices.face_editor_mouth_smile_range), maximum=max(face_editor_choices.face_editor_mouth_smile_range), step=0.1, value=float(_get_pref('face_editor_mouth_smile', 0.0)), label="Smile")
+                        fe_head_pitch = gr.Slider(minimum=min(face_editor_choices.face_editor_head_pitch_range), maximum=max(face_editor_choices.face_editor_head_pitch_range), step=0.1, value=float(_get_pref('face_editor_head_pitch', 0.0)), label="Head Pitch")
                     with gr.Row():
-                        fe_mouth_grim = gr.Slider(minimum=min(face_editor_choices.face_editor_mouth_grim_range), maximum=max(face_editor_choices.face_editor_mouth_grim_range), step=0.1, value=0.0, label="Mouth Grim")
-                        fe_mouth_pout = gr.Slider(minimum=min(face_editor_choices.face_editor_mouth_pout_range), maximum=max(face_editor_choices.face_editor_mouth_pout_range), step=0.1, value=0.0, label="Mouth Pout")
-                        fe_mouth_purse = gr.Slider(minimum=min(face_editor_choices.face_editor_mouth_purse_range), maximum=max(face_editor_choices.face_editor_mouth_purse_range), step=0.1, value=0.0, label="Mouth Purse")
+                        fe_mouth_grim = gr.Slider(minimum=min(face_editor_choices.face_editor_mouth_grim_range), maximum=max(face_editor_choices.face_editor_mouth_grim_range), step=0.1, value=float(_get_pref('face_editor_mouth_grim', 0.0)), label="Mouth Grim")
+                        fe_mouth_pout = gr.Slider(minimum=min(face_editor_choices.face_editor_mouth_pout_range), maximum=max(face_editor_choices.face_editor_mouth_pout_range), step=0.1, value=float(_get_pref('face_editor_mouth_pout', 0.0)), label="Mouth Pout")
+                        fe_mouth_purse = gr.Slider(minimum=min(face_editor_choices.face_editor_mouth_purse_range), maximum=max(face_editor_choices.face_editor_mouth_purse_range), step=0.1, value=float(_get_pref('face_editor_mouth_purse', 0.0)), label="Mouth Purse")
                     with gr.Row():
-                        fe_mouth_pos_h = gr.Slider(minimum=min(face_editor_choices.face_editor_mouth_position_horizontal_range), maximum=max(face_editor_choices.face_editor_mouth_position_horizontal_range), step=0.1, value=0.0, label="Mouth Pos H")
-                        fe_mouth_pos_v = gr.Slider(minimum=min(face_editor_choices.face_editor_mouth_position_vertical_range), maximum=max(face_editor_choices.face_editor_mouth_position_vertical_range), step=0.1, value=0.0, label="Mouth Pos V")
+                        fe_mouth_pos_h = gr.Slider(minimum=min(face_editor_choices.face_editor_mouth_position_horizontal_range), maximum=max(face_editor_choices.face_editor_mouth_position_horizontal_range), step=0.1, value=float(_get_pref('face_editor_mouth_position_horizontal', 0.0)), label="Mouth Pos H")
+                        fe_mouth_pos_v = gr.Slider(minimum=min(face_editor_choices.face_editor_mouth_position_vertical_range), maximum=max(face_editor_choices.face_editor_mouth_position_vertical_range), step=0.1, value=float(_get_pref('face_editor_mouth_position_vertical', 0.0)), label="Mouth Pos V")
                     with gr.Row():
-                        fe_head_yaw = gr.Slider(minimum=min(face_editor_choices.face_editor_head_yaw_range), maximum=max(face_editor_choices.face_editor_head_yaw_range), step=0.1, value=0.0, label="Head Yaw")
-                        fe_head_roll = gr.Slider(minimum=min(face_editor_choices.face_editor_head_roll_range), maximum=max(face_editor_choices.face_editor_head_roll_range), step=0.1, value=0.0, label="Head Roll")
+                        fe_head_yaw = gr.Slider(minimum=min(face_editor_choices.face_editor_head_yaw_range), maximum=max(face_editor_choices.face_editor_head_yaw_range), step=0.1, value=float(_get_pref('face_editor_head_yaw', 0.0)), label="Head Yaw")
+                        fe_head_roll = gr.Slider(minimum=min(face_editor_choices.face_editor_head_roll_range), maximum=max(face_editor_choices.face_editor_head_roll_range), step=0.1, value=float(_get_pref('face_editor_head_roll', 0.0)), label="Head Roll")
                     with gr.Row():
-                        debugger_enabled = gr.Checkbox(value=False, label="Enable Face Debugger")
-                        dbg_items = gr.CheckboxGroup(choices=face_debugger_choices.face_debugger_items, value=['face-landmark-5/68','face-mask'], label="Debugger Items")
+                        debugger_enabled = gr.Checkbox(value=bool(_get_pref('face_debugger_enabled', False)), label="Enable Face Debugger")
+                        dbg_items = gr.CheckboxGroup(choices=face_debugger_choices.face_debugger_items, value=_get_pref('face_debugger_items', ['face-landmark-5/68','face-mask']), label="Debugger Items")
                     with gr.Row():
-                        lip_enabled = gr.Checkbox(value=False, label="Enable Lip Syncer")
-                        lip_model = gr.Dropdown(choices=lip_syncer_choices.lip_syncer_models, value=(lip_syncer_choices.lip_syncer_models[0] if lip_syncer_choices.lip_syncer_models else None), label="Lip Model")
-                        lip_weight = gr.Slider(minimum=min(lip_syncer_choices.lip_syncer_weight_range), maximum=max(lip_syncer_choices.lip_syncer_weight_range), step=0.05, value=0.5, label="Lip Weight")
+                        lip_enabled = gr.Checkbox(value=bool(_get_pref('lip_syncer_enabled', False)), label="Enable Lip Syncer")
+                        lip_model = gr.Dropdown(choices=lip_syncer_choices.lip_syncer_models, value=_get_pref('lip_syncer_model', (lip_syncer_choices.lip_syncer_models[0] if lip_syncer_choices.lip_syncer_models else None)), label="Lip Model")
+                        lip_weight = gr.Slider(minimum=min(lip_syncer_choices.lip_syncer_weight_range), maximum=max(lip_syncer_choices.lip_syncer_weight_range), step=0.05, value=float(_get_pref('lip_syncer_weight', 0.5)), label="Lip Weight")
             with gr.Row():
                 start_btn = gr.Button("Start")
                 stop_btn = gr.Button("Stop")
@@ -2019,6 +2080,7 @@ def main() -> None:
                     if v in ("strict","moderate","relaxed"):
                         state_manager.set_item('video_memory_strategy', v)
                         _cleanup_inference()
+                        _persist_state()
                 except Exception:
                     pass
             video_mem.change(on_video_mem_change, inputs=video_mem, outputs=[])
@@ -2028,6 +2090,7 @@ def main() -> None:
             def on_occl_enabled_change(flag: bool):
                 try:
                     state_manager.set_item('use_occlusion', bool(flag))
+                    _persist_state()
                 except Exception:
                     pass
             occl_enabled.change(on_occl_enabled_change, inputs=occl_enabled, outputs=[])
@@ -2035,6 +2098,7 @@ def main() -> None:
             def on_show_boxes_change(flag: bool):
                 try:
                     state_manager.set_item('show_boxes', bool(flag))
+                    _persist_state()
                 except Exception:
                     pass
             show_boxes.change(on_show_boxes_change, inputs=show_boxes, outputs=[])
@@ -2042,6 +2106,7 @@ def main() -> None:
             def on_show_overlay_change(flag: bool):
                 try:
                     state_manager.set_item('show_overlay', bool(flag))
+                    _persist_state()
                 except Exception:
                     pass
             show_overlay.change(on_show_overlay_change, inputs=show_overlay, outputs=[])
@@ -2049,6 +2114,7 @@ def main() -> None:
             def on_debug_logs_change(flag: bool):
                 try:
                     state_manager.set_item('debug_logs', bool(flag))
+                    _persist_state()
                 except Exception:
                     pass
             debug_logs.change(on_debug_logs_change, inputs=debug_logs, outputs=[])
@@ -2062,6 +2128,14 @@ def main() -> None:
                     return gr.update()
 
             swap_mode.change(on_swap_mode_change, inputs=swap_mode, outputs=[])
+            # Persist swap mode immediately
+            def _persist_swap_mode(mode: str):
+                try:
+                    state_manager.set_item('swap_mode', mode)
+                    _persist_state()
+                except Exception:
+                    pass
+            swap_mode.change(_persist_swap_mode, inputs=swap_mode, outputs=[])
 
             def on_source_files_change(files):
                 try:
@@ -2077,6 +2151,7 @@ def main() -> None:
                                 _source_imgs.append(img)
                         except Exception:
                             continue
+                    _persist_state()
                 except Exception:
                     pass
             source_files.change(on_source_files_change, inputs=source_files, outputs=[])
@@ -2085,6 +2160,7 @@ def main() -> None:
             def on_fast_startup_toggle(flag: bool):
                 try:
                     state_manager.set_item('fast_startup', bool(flag))
+                    _persist_state()
                 except Exception:
                     pass
             fast_startup.change(on_fast_startup_toggle, inputs=fast_startup, outputs=[])
@@ -2100,9 +2176,90 @@ def main() -> None:
                                 state_manager.set_item('face_editor_ready', True)
                         except Exception:
                             pass
+                    _persist_state()
                 except Exception:
                     pass
             editor_enabled.change(on_editor_toggle, inputs=editor_enabled, outputs=[])
+
+            # Camera preference handlers (persist on change)
+            def _set_and_persist(key, val):
+                try:
+                    state_manager.set_item(key, val)
+                    _persist_state()
+                except Exception:
+                    pass
+
+            backend.change(lambda v: _set_and_persist('backend', v), inputs=backend, outputs=[])
+            camera.change(lambda v: _set_and_persist('camera_choice', v), inputs=camera, outputs=[])
+            res.change(lambda v: _set_and_persist('resolution_preset', v), inputs=res, outputs=[])
+            width.change(lambda v: _set_and_persist('width', int(v)), inputs=width, outputs=[])
+            height.change(lambda v: _set_and_persist('height', int(v)), inputs=height, outputs=[])
+            fps.change(lambda v: _set_and_persist('fps', float(v)), inputs=fps, outputs=[])
+            dshow_name_drop.change(lambda v: _set_and_persist('dshow_name_mode', v), inputs=dshow_name_drop, outputs=[])
+            dshow_name.change(lambda v: _set_and_persist('dshow_name_text', v), inputs=dshow_name, outputs=[])
+            dshow_name_drop.change(lambda v: _set_and_persist('dshow_name_device', v), inputs=dshow_name_drop, outputs=[])
+            convert_rgb.change(lambda v: _set_and_persist('convert_rgb', bool(v)), inputs=convert_rgb, outputs=[])
+            force_fourcc.change(lambda v: _set_and_persist('force_fourcc', v), inputs=force_fourcc, outputs=[])
+            retry_black.change(lambda v: _set_and_persist('retry_black', int(v)), inputs=retry_black, outputs=[])
+            gentle_mode.change(lambda v: _set_and_persist('gentle_mode', bool(v)), inputs=gentle_mode, outputs=[])
+            auto_repair.change(lambda v: _set_and_persist('auto_repair', bool(v)), inputs=auto_repair, outputs=[])
+            color_mode.change(lambda v: _set_and_persist('color_mode', v), inputs=color_mode, outputs=[])
+            lock_exposure.change(lambda v: _set_and_persist('lock_exposure', bool(v)), inputs=lock_exposure, outputs=[])
+            exposure_value.change(lambda v: _set_and_persist('exposure_value', float(v)), inputs=exposure_value, outputs=[])
+            lock_wb.change(lambda v: _set_and_persist('lock_wb', bool(v)), inputs=lock_wb, outputs=[])
+            wb_temperature.change(lambda v: _set_and_persist('wb_temperature', int(v)), inputs=wb_temperature, outputs=[])
+            show_native.change(lambda v: _set_and_persist('show_native', bool(v)), inputs=show_native, outputs=[])
+
+            # Enhancing and Processor persistence handlers
+            face_enh_enabled.change(lambda v: _set_and_persist('face_enhancer_enabled', bool(v)), inputs=face_enh_enabled, outputs=[])
+            face_enh_model.change(lambda v: _set_and_persist('face_enhancer_model', v), inputs=face_enh_model, outputs=[])
+            face_enh_blend.change(lambda v: _set_and_persist('face_enhancer_blend', int(v)), inputs=face_enh_blend, outputs=[])
+            face_enh_weight.change(lambda v: _set_and_persist('face_enhancer_weight', float(v)), inputs=face_enh_weight, outputs=[])
+            frame_enh_enabled.change(lambda v: _set_and_persist('frame_enhancer_enabled', bool(v)), inputs=frame_enh_enabled, outputs=[])
+            frame_enh_model.change(lambda v: _set_and_persist('frame_enhancer_model', v), inputs=frame_enh_model, outputs=[])
+            frame_enh_blend.change(lambda v: _set_and_persist('frame_enhancer_blend', int(v)), inputs=frame_enh_blend, outputs=[])
+            enhance_async.change(lambda v: _set_and_persist('enhance_async', bool(v)), inputs=enhance_async, outputs=[])
+
+            colorizer_enabled.change(lambda v: _set_and_persist('frame_colorizer_enabled', bool(v)), inputs=colorizer_enabled, outputs=[])
+            colorizer_model.change(lambda v: _set_and_persist('frame_colorizer_model', v), inputs=colorizer_model, outputs=[])
+            colorizer_size.change(lambda v: _set_and_persist('frame_colorizer_size', v), inputs=colorizer_size, outputs=[])
+            colorizer_blend.change(lambda v: _set_and_persist('frame_colorizer_blend', int(v)), inputs=colorizer_blend, outputs=[])
+
+            expr_enabled.change(lambda v: _set_and_persist('expression_restorer_enabled', bool(v)), inputs=expr_enabled, outputs=[])
+            expr_model.change(lambda v: _set_and_persist('expression_restorer_model', v), inputs=expr_model, outputs=[])
+            expr_factor.change(lambda v: _set_and_persist('expression_restorer_factor', int(v)), inputs=expr_factor, outputs=[])
+            expr_areas.change(lambda v: _set_and_persist('expression_restorer_areas', v), inputs=expr_areas, outputs=[])
+
+            debugger_enabled.change(lambda v: _set_and_persist('face_debugger_enabled', bool(v)), inputs=debugger_enabled, outputs=[])
+            dbg_items.change(lambda v: _set_and_persist('face_debugger_items', v), inputs=dbg_items, outputs=[])
+
+            # Execution provider/device persistence
+            def _persist_exec_provider(v: str):
+                try:
+                    state_manager.set_item('execution_providers', [v])
+                    _persist_state()
+                except Exception:
+                    pass
+            exec_provider.change(_persist_exec_provider, inputs=exec_provider, outputs=[])
+
+            def _persist_exec_device(v: str):
+                try:
+                    state_manager.set_item('execution_device_ids', [str(v)])
+                    _persist_state()
+                except Exception:
+                    pass
+            exec_device.change(_persist_exec_device, inputs=exec_device, outputs=[])
+
+            # Detection tab persistence
+            d_model.change(lambda v: _set_and_persist('detector_model', v), inputs=d_model, outputs=[])
+            d_size.change(lambda v: _set_and_persist('detector_size', v), inputs=d_size, outputs=[])
+            d_score.change(lambda v: _set_and_persist('detector_score', float(v)), inputs=d_score, outputs=[])
+            selector_mode_dd.change(lambda v: _set_and_persist('selector_mode', v), inputs=selector_mode_dd, outputs=[])
+            auto_fallback.change(lambda v: _set_and_persist('auto_fallback', bool(v)), inputs=auto_fallback, outputs=[])
+            l_model.change(lambda v: _set_and_persist('landmarker_model', v), inputs=l_model, outputs=[])
+            l_score.change(lambda v: _set_and_persist('landmarker_score', float(v)), inputs=l_score, outputs=[])
+            o_model.change(lambda v: _set_and_persist('occluder_model', v), inputs=o_model, outputs=[])
+            p_model.change(lambda v: _set_and_persist('parser_model', v), inputs=p_model, outputs=[])
 
             # Face swapper live handlers
             def on_face_swapper_model_change(model: str):
@@ -2110,6 +2267,7 @@ def main() -> None:
                     state_manager.set_item("face_swapper_model", model)
                     choices = proc_choices.face_swapper_set.get(model, ["256x256"]) or ["256x256"]
                     _cleanup_inference()
+                    _persist_state()
                     return gr.update(choices=choices, value=choices[0])
                 except Exception:
                     return gr.update()
@@ -2118,6 +2276,7 @@ def main() -> None:
             def on_face_swapper_pixel_change(pixel: str):
                 try:
                     state_manager.set_item("face_swapper_pixel_boost", pixel)
+                    _persist_state()
                 except Exception:
                     pass
             fs_pixel.change(on_face_swapper_pixel_change, inputs=fs_pixel, outputs=[])
@@ -2125,6 +2284,7 @@ def main() -> None:
             def on_face_swapper_weight_change(w: float):
                 try:
                     state_manager.set_item("face_swapper_weight", float(w))
+                    _persist_state()
                 except Exception:
                     pass
             fs_weight.change(on_face_swapper_weight_change, inputs=fs_weight, outputs=[])
@@ -2253,6 +2413,22 @@ def main() -> None:
                     state_manager.set_item('fast_startup', bool(fast_startup_flag))
                 except Exception:
                     pass
+                # Load persisted source_paths into cache so face swapper can use them without reselect
+                try:
+                    paths = (_load_prefs() or {}).get('source_paths') or []
+                    if paths:
+                        state_manager.set_item('source_paths', paths)
+                        global _source_imgs
+                        _source_imgs = []
+                        for p in paths:
+                            try:
+                                img = cv2.imread(p)
+                                if isinstance(img, np.ndarray) and getattr(img, 'size', 0) > 0:
+                                    _source_imgs.append(img)
+                            except Exception:
+                                continue
+                except Exception:
+                    pass
                 # Apply initial defaults for processors so they work before any change
                 try:
                     state_manager.set_item('frame_colorizer_model', colorizer_model_v)
@@ -2309,6 +2485,31 @@ def main() -> None:
                     source_files, ds_model, morph, fs_model, fs_pixel, fs_weight, face_enh_enabled, face_enh_model,
                     face_enh_blend, face_enh_weight, frame_enh_enabled, frame_enh_model, frame_enh_blend, enhance_async
                 )
+
+            # Preferences load-sync (minimal) so refresh restores key UI state
+            def _prefs_load_sync():
+                try:
+                    prefs = _load_prefs() or {}
+                    sm = prefs.get('swap_mode', 'deep')
+                    exec_prov = (prefs.get('execution_providers') or ['cpu'])[0]
+                    exec_dev = (prefs.get('execution_device_ids') or ['0'])[0]
+                    video_mem_val = prefs.get('video_memory_strategy', 'moderate')
+                    LOGGER.info(f"[prefs_load_sync] swap_mode={sm} exec_prov={exec_prov} exec_dev={exec_dev} video_mem={video_mem_val}")
+                    return (
+                        gr.update(value=exec_prov),
+                        gr.update(value=str(exec_dev)),
+                        gr.update(value=video_mem_val),
+                        gr.update(value=sm),
+                    )
+                except Exception as e:
+                    LOGGER.exception(f"[prefs_load_sync] failed: {e}")
+                    return (gr.update(), gr.update(), gr.update(), gr.update())
+
+            demo.load(
+                fn=_prefs_load_sync,
+                inputs=[],
+                outputs=[exec_provider, exec_device, video_mem, swap_mode],
+            )
 
             demo.load(
                 fn=_gr_autostart,
