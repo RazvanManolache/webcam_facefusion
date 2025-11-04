@@ -23,6 +23,11 @@ import gc
 from concurrent.futures import ThreadPoolExecutor, Future
 import json
 import shutil
+try:
+    import pyvirtualcam
+    HAS_PYVIRTUALCAM = True
+except Exception:
+    HAS_PYVIRTUALCAM = False
 
 from facefusion import state_manager
 from facefusion.types import VisionFrame
@@ -61,6 +66,7 @@ LOGGER = logging.getLogger("webcam_deep_swap")
 
 # Global cache for live face swapper sources
 _source_imgs = []
+_virt_cam = None
 if not LOGGER.handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -1189,6 +1195,7 @@ def gr_stream(
     debug_logs: bool,
     show_boxes: bool,
     show_native_window: bool,
+    virtual_cam_enabled: bool,
     colorizer_enabled: bool,
     expr_enabled: bool,
     age_enabled: bool,
@@ -1513,6 +1520,18 @@ def gr_stream(
                     cv2.waitKey(1)
             except Exception:
                 pass
+            # Virtual camera output
+            try:
+                if virtual_cam_enabled and HAS_PYVIRTUALCAM:
+                    global _virt_cam
+                    if _virt_cam is None:
+                        h, w = frame_out.shape[0], frame_out.shape[1]
+                        _virt_cam = pyvirtualcam.Camera(width=w, height=h, fps=int(target_fps), fmt=pyvirtualcam.PixelFormat.RGB)
+                    rgb_frame = frame_out if (isinstance(color_mode, str) and color_mode.startswith("Assume RGB")) else cv2.cvtColor(frame_out, cv2.COLOR_BGR2RGB)
+                    _virt_cam.send(rgb_frame)
+                    _virt_cam.sleep_until_next_frame()
+            except Exception:
+                pass
             # Stream to Gradio output
             if isinstance(color_mode, str) and color_mode.startswith("Assume RGB"):
                 yield frame_out
@@ -1572,6 +1591,14 @@ def gr_stream(
 def gr_stop_stream():
     global _stop_stream
     _stop_stream = True
+    # Close virtual camera if open
+    try:
+        global _virt_cam
+        if _virt_cam is not None:
+            _virt_cam.close()
+            _virt_cam = None
+    except Exception:
+        pass
     return None
 
 
@@ -1775,6 +1802,7 @@ def main() -> None:
                 test_btn = gr.Button("Test Capture")
                 reconnect_btn = gr.Button("Reconnect")
                 show_native = gr.Checkbox(value=True, label="Show native window")
+                virtual_cam = gr.Checkbox(value=bool(_get_pref('virtual_cam_enabled', False)), label="Enable Virtual Camera" if HAS_PYVIRTUALCAM else "Enable Virtual Camera (install pyvirtualcam)")
                 auto_start = gr.Checkbox(value=True, label="Auto-start stream")
             out = gr.Image(label="Output", streaming=True)
             diag = gr.Textbox(label="Diagnostics", lines=6)
@@ -2209,6 +2237,7 @@ def main() -> None:
             lock_wb.change(lambda v: _set_and_persist('lock_wb', bool(v)), inputs=lock_wb, outputs=[])
             wb_temperature.change(lambda v: _set_and_persist('wb_temperature', int(v)), inputs=wb_temperature, outputs=[])
             show_native.change(lambda v: _set_and_persist('show_native', bool(v)), inputs=show_native, outputs=[])
+            virtual_cam.change(lambda v: _set_and_persist('virtual_cam_enabled', bool(v)), inputs=virtual_cam, outputs=[])
 
             # Enhancing and Processor persistence handlers
             face_enh_enabled.change(lambda v: _set_and_persist('face_enhancer_enabled', bool(v)), inputs=face_enh_enabled, outputs=[])
@@ -2372,7 +2401,7 @@ def main() -> None:
                     occl_enabled, fps, backend, dshow_name_drop, convert_rgb, force_fourcc, retry_black, gentle_mode, auto_repair, color_mode,
                     lock_exposure, exposure_value, lock_wb, wb_temperature,
                     show_overlay, debug_logs, show_boxes,
-                    show_native,
+                    show_native, virtual_cam,
                     colorizer_enabled, expr_enabled, age_enabled, editor_enabled, debugger_enabled, lip_enabled,
                     selector_mode_dd, auto_fallback,
                     exec_provider, exec_device, video_mem,
@@ -2386,6 +2415,16 @@ def main() -> None:
                 outputs=out,
             )
             stop_btn.click(gr_stop_stream, inputs=None, outputs=out)
+            test_btn.click(
+                fn=test_capture,
+                inputs=[camera, backend, dshow_name_drop, width, height, convert_rgb, force_fourcc],
+                outputs=[out, diag],
+            )
+            reconnect_btn.click(
+                fn=gr_reconnect,
+                inputs=[camera, backend, dshow_name_drop, width, height, fps, convert_rgb, force_fourcc, gentle_mode],
+                outputs=[out, diag],
+            )
             gr.Button("Free VRAM").click(gr_free_vram, inputs=None, outputs=diag)
             shutdown_btn.click(gr_shutdown, inputs=None, outputs=out)
 
@@ -2393,7 +2432,7 @@ def main() -> None:
             def _gr_autostart(
                 camera_choice, width, height, occl_enabled, fps, backend, dshow_name_drop, convert_rgb,
                 force_fourcc, retry_black, gentle_mode, auto_repair, color_mode, lock_exposure, exposure_value, lock_wb,
-                wb_temperature, show_overlay, debug_logs, show_boxes, show_native_flag, fast_startup_flag,
+                wb_temperature, show_overlay, debug_logs, show_boxes, show_native_flag, virtual_cam_flag, fast_startup_flag,
                 colorizer_flag, expr_flag, age_flag, editor_flag, debugger_flag, lip_flag,
                 colorizer_model_v, colorizer_size_v, colorizer_blend_v,
                 expr_model_v, expr_factor_v, expr_areas_v,
@@ -2477,7 +2516,7 @@ def main() -> None:
                 yield from gr_stream(
                     camera_choice, width, height, occl_enabled, fps, backend, dshow_name_drop, convert_rgb,
                     force_fourcc, retry_black, gentle_mode, auto_repair, color_mode, lock_exposure, exposure_value,
-                    lock_wb, wb_temperature, show_overlay, debug_logs, show_boxes, show_native_flag,
+                    lock_wb, wb_temperature, show_overlay, debug_logs, show_boxes, show_native_flag, virtual_cam_flag,
                     colorizer_flag, expr_flag, age_flag, editor_flag, debugger_flag, lip_flag,
                     selector_mode_dd, auto_fallback,
                     exec_provider, exec_device, video_mem,
@@ -2494,161 +2533,64 @@ def main() -> None:
                     exec_prov = (prefs.get('execution_providers') or ['cpu'])[0]
                     exec_dev = (prefs.get('execution_device_ids') or ['0'])[0]
                     video_mem_val = prefs.get('video_memory_strategy', 'moderate')
-                    LOGGER.info(f"[prefs_load_sync] swap_mode={sm} exec_prov={exec_prov} exec_dev={exec_dev} video_mem={video_mem_val}")
+                    vc_enabled = bool(prefs.get('virtual_cam_enabled', False))
+                    LOGGER.info(f"[prefs_load_sync] swap_mode={sm} exec_prov={exec_prov} exec_dev={exec_dev} video_mem={video_mem_val} virtual_cam={vc_enabled}")
                     return (
                         gr.update(value=exec_prov),
                         gr.update(value=str(exec_dev)),
                         gr.update(value=video_mem_val),
                         gr.update(value=sm),
+                        gr.update(value=vc_enabled),
                     )
                 except Exception as e:
                     LOGGER.exception(f"[prefs_load_sync] failed: {e}")
-                    return (gr.update(), gr.update(), gr.update(), gr.update())
+                    return (gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
 
             demo.load(
                 fn=_prefs_load_sync,
                 inputs=[],
-                outputs=[exec_provider, exec_device, video_mem, swap_mode],
+                outputs=[exec_provider, exec_device, video_mem, swap_mode, virtual_cam],
             )
 
-            demo.load(
-                fn=_gr_autostart,
-                inputs=[
-                    camera, width, height, occl_enabled, fps, backend, dshow_name_drop, convert_rgb,
-                    force_fourcc, retry_black, gentle_mode, auto_repair, color_mode, lock_exposure, exposure_value, lock_wb,
-                    wb_temperature, show_overlay, debug_logs, show_boxes, show_native, fast_startup,
-                    colorizer_enabled, expr_enabled, age_enabled, editor_enabled, debugger_enabled, lip_enabled,
-                    colorizer_model, colorizer_size, colorizer_blend,
-                    expr_model, expr_factor, expr_areas,
-                    age_model, age_direction,
-                    editor_model, fe_eyebrow_dir, fe_eye_h, fe_eye_v, fe_eye_open, fe_lip_open, fe_mouth_smile, fe_head_pitch, fe_head_yaw, fe_head_roll,
-                    dbg_items,
-                    lip_model, lip_weight,
-                    selector_mode_dd, auto_fallback, exec_provider, exec_device, video_mem,
-                    d_model, d_size, d_score, l_model, l_score, o_model, p_model, swap_mode, source_files,
-                    ds_model, morph, fs_model, fs_pixel, fs_weight, face_enh_enabled, face_enh_model, face_enh_blend,
-                    face_enh_weight, frame_enh_enabled, frame_enh_model, frame_enh_blend, enhance_async, auto_start
-                ],
-                outputs=out,
-            )
+            # Launch the GUI
+            demo.launch(server_name="127.0.0.1", server_port=7861, show_error=True, inbrowser=False, share=False)
+            return
 
-            def test_capture(camera_choice, backend_name, dshow_name_text, width, height, convert_rgb_flag, fourcc_name):
-                # Simple one-shot capture with diagnostics
-                info = []
-                try:
-                    if not camera_choice.startswith("["):
-                        return None, "Invalid camera selection"
-                    cam_index = int(camera_choice.split(']')[0][1:])
-                    cap = _open_capture(cam_index, backend_name, dshow_name_text or None)
-                    if cap is None:
-                        return None, f"Open failed (backend={backend_name}, name={dshow_name_text})"
-                    if width:
-                        cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
-                    if height:
-                        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
-                    _set_convert_rgb(cap, convert_rgb_flag)
-                    _apply_fourcc(cap, fourcc_name)
-                    ok, frame = cap.read()
-                    if not ok or frame is None:
-                        cap.release()
-                        return None, "Read failed"
-                    mean_val = float(frame.mean())
-                    size = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
-                    fps_r = cap.get(cv2.CAP_PROP_FPS)
-                    fourcc_val = int(cap.get(cv2.CAP_PROP_FOURCC))
-                    fourcc_str = ''.join([chr((fourcc_val >> 8*i) & 0xFF) for i in range(4)])
-                    info.append(f"size={size} fps={fps_r:.1f} fourcc={fourcc_str} mean={mean_val:.2f}")
-                    cap.release()
-                    return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), '\n'.join(info)
-                except Exception as e:
-                    return None, f"Diag error: {e}"
-
-            test_btn.click(
-                fn=test_capture,
-                inputs=[camera, backend, dshow_name_drop, width, height, convert_rgb, force_fourcc],
-                outputs=[out, diag],
-            )
-            reconnect_btn.click(
-                fn=gr_reconnect,
-                inputs=[camera, backend, dshow_name_drop, width, height, fps, convert_rgb, force_fourcc, gentle_mode],
-                outputs=[out, diag],
-            )
-
-        demo.launch(server_name="127.0.0.1", server_port=7861, show_error=True, inbrowser=False, share=False)
-        return
-
-    if args.list_cams:
-        list_cameras(12)
-        return
-
-    init_state(model_id=args.model, use_occlusion=not args.no_occlusion, morph=args.morph)
-
-    cap = cv2.VideoCapture(args.camera, cv2.CAP_DSHOW)
-    if not cap.isOpened():
-        print(f"Failed to open camera index {args.camera}")
-        sys.exit(1)
-
-    # Try to set resolution
-    if args.width:
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
-    if args.height:
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
-
-    window_name = "Webcam (raw)"
-    out_name = "Webcam (deep swap)"
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    cv2.namedWindow(out_name, cv2.WINDOW_NORMAL)
-
-    running = False
-    do_deep_swap = True
-
-    draw_help = True
-    last_toggle = 0.0
-
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            print("No frame from camera. Exiting...")
-            break
-
-        display = frame.copy()
-
-        # Show controls overlay
-        if draw_help:
-            draw_info(display, "Controls: [SPACE]=Start/Stop  [F]=Toggle DeepSwap  [H]=Help  [Q]=Quit", (10, 24))
-            draw_info(display, f"Status: running={running} deep_swap={do_deep_swap}", (10, 50))
-
-        cv2.imshow(window_name, display)
-
-        if running:
-            processed = process_frame(frame, do_deep_swap)
-            cv2.imshow(out_name, processed)
-        else:
-            # If not running, mirror raw into out window for convenience
-            cv2.imshow(out_name, frame)
-
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q') or key == ord('Q'):
-            break
-        elif key == ord(' '):
-            running = not running
-        elif key in (ord('f'), ord('F')):
-            # de-bounce
-            now = time.time()
-            if now - last_toggle > 0.2:
-                do_deep_swap = not do_deep_swap
-                last_toggle = now
-        elif key in (ord('h'), ord('H')):
-            draw_help = not draw_help
-
-    cap.release()
-    cv2.destroyAllWindows()
-
-    # Cleanup heavy caches/pools
+def test_capture(camera_choice, backend_name, dshow_name_text, width, height, convert_rgb_flag, fourcc_name):
+    # Simple one-shot capture with diagnostics
+    info = []
+    cap = None
     try:
-        deep_swapper.post_process()
-    except Exception:
-        pass
+        if not camera_choice.startswith("["):
+            return None, "Invalid camera selection"
+        cam_index = int(camera_choice.split(']')[0][1:])
+        cap = _open_capture(cam_index, backend_name, dshow_name_text or None)
+        if cap is None:
+            return None, f"Open failed (backend={backend_name}, name={dshow_name_text})"
+        if width:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
+        if height:
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
+        _set_convert_rgb(cap, convert_rgb_flag)
+        _apply_fourcc(cap, fourcc_name)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            return None, "Read failed"
+        mean_val = float(frame.mean())
+        size = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+        fps_r = cap.get(cv2.CAP_PROP_FPS)
+        fourcc_val = int(cap.get(cv2.CAP_PROP_FOURCC))
+        fourcc_str = ''.join([chr((fourcc_val >> 8*i) & 0xFF) for i in range(4)])
+        info.append(f"size={size} fps={fps_r:.1f} fourcc={fourcc_str} mean={mean_val:.2f}")
+        return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), '\n'.join(info)
+    except Exception as e:
+        return None, f"Diag error: {e}"
+    finally:
+        try:
+            if cap is not None:
+                cap.release()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

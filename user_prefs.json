@@ -1,8 +1,8 @@
 {
-  "swap_mode": "none",
-  "deep_swapper_model": "iperov/james_carrey_224",
-  "face_swapper_model": "blendswap_256",
-  "face_swapper_pixel_boost": "256x256",
+  "swap_mode": "face",
+  "deep_swapper_model": "iperov/rowan_atkinson_224",
+  "face_swapper_model": "inswapper_128",
+  "face_swapper_pixel_boost": "128x128",
   "face_swapper_weight": 0.5,
   "expression_restorer_enabled": false,
   "age_modifier_enabled": false,
@@ -44,5 +44,9 @@
     "0"
   ],
   "video_memory_strategy": "moderate",
-  "fast_startup": true
+  "fast_startup": true,
+  "show_native": false,
+  "source_paths": [
+    "C:\\Users\\razva\\AppData\\Local\\Temp\\gradio\\92d59a9609bb060f65d1dc5eb2cc56842b0aa8c69d4e8573565420bceeb23108\\Clipboard_11-04-2025_01.png"
+  ]
 }

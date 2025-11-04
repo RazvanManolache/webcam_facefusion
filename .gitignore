@@ -7,3 +7,4 @@ __pycache__
 .vs
 *.pyproj
 *.sln
+user_prefs.json

@@ -12,6 +12,7 @@ tqdm>=4.66.0
 
 # Image I/O helpers sometimes used by modules
 Pillow>=10.0.0
+pyvirtualcam>=0.14
 
 # Optional (Windows GPU via DirectML). Install manually if desired.
 # onnxruntime-directml>=1.17.0
