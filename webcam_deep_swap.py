@@ -475,11 +475,10 @@ def draw_info(frame: VisionFrame, info: str, org: Tuple[int, int] = (10, 24)) ->
 def process_frame(frame: VisionFrame, do_swap: bool, show_debug: bool = False, debug_log: bool = False, show_boxes: bool = False) -> VisionFrame:
     if frame is None:
         return None
-    # Real-time toggles: prefer state over passed args to reflect live UI changes
+    # Determine swap on/off from swap_mode for real-time behavior
     try:
-        st_deep = state_manager.get_item('deep_enabled')
-        if isinstance(st_deep, bool):
-            do_swap = st_deep
+        sm = (state_manager.get_item('swap_mode') or 'deep')
+        do_swap = (sm != 'none')
     except Exception:
         pass
     try:
@@ -507,6 +506,10 @@ def process_frame(frame: VisionFrame, do_swap: bool, show_debug: bool = False, d
             state_manager.set_item("face_detector_score", 0.3)
         except Exception:
             pass
+    # Prepare temp/out frame first so processors can run even when no swap
+    temp = frame.copy() if hasattr(frame, "copy") else frame
+    out = temp
+
     if not do_swap:
         if show_debug:
             try:
@@ -524,18 +527,16 @@ def process_frame(frame: VisionFrame, do_swap: bool, show_debug: bool = False, d
                     LOGGER.info(f"[process_frame] no-swap: faces={len(faces_dbg)}")
             except Exception:
                 pass
-        return frame
-
-    # Build inputs
-    temp = frame.copy() if hasattr(frame, "copy") else frame
-    inputs = {
-        "reference_vision_frame": frame,  # unused when selector_mode='one'
-        "target_vision_frame": frame,
-        "temp_vision_frame": temp,
-    }
+    else:
+        # Build inputs for swapping path
+        inputs = {
+            "reference_vision_frame": frame,  # unused when selector_mode='one'
+            "target_vision_frame": frame,
+            "temp_vision_frame": temp,
+        }
 
     try:
-        # Ensure faces are selected in state for this frame; if nothing found, skip swapping
+        # Ensure faces are selected; if none, we will skip swapping but still allow processors
         try:
             faces_res = select_faces(reference_vision_frame=frame, target_vision_frame=frame)
             faces = faces_res[0] if isinstance(faces_res, tuple) else faces_res
@@ -554,15 +555,12 @@ def process_frame(frame: VisionFrame, do_swap: bool, show_debug: bool = False, d
                         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 except Exception:
                     pass
-            if not faces:
-                if debug_log:
-                    LOGGER.info("[process_frame] skip swap: faces=0")
-                return frame
+            if not faces and debug_log:
+                LOGGER.info("[process_frame] no faces: swapping is skipped but processors may run")
         except Exception as e:
-            # If selection fails, fall back without swapping
+            # Selection failure: skip swapping but continue to processors
             if debug_log:
-                LOGGER.exception(f"[process_frame] select_faces failed; skipping swap: {e}")
-            return frame
+                LOGGER.exception(f"[process_frame] select_faces error; continuing without swap: {e}")
         # Ensure face mask parameters are present before swapping (runtime guard)
         try:
             blur_val = state_manager.get_item("face_mask_blur")
@@ -573,70 +571,77 @@ def process_frame(frame: VisionFrame, do_swap: bool, show_debug: bool = False, d
                 state_manager.set_item("face_mask_padding", (0, 0, 0, 0))
         except Exception:
             pass
-        # Choose swapper
+        # Choose swapper guarded by do_swap; otherwise keep 'out' as temp and let processors run
         swap_mode = (state_manager.get_item("swap_mode") or "deep")
-        out = None
-        if swap_mode == "face":
-            # Prepare source frames from uploaded images if any
-            try:
-                cached_face = _get_cached_source_face()
-                if cached_face is not None and faces:
-                    out = temp
-                    for target_face in faces:
-                        try:
-                            t_scaled = scale_face(target_face, frame, out)
-                            out = ff_face_swapper.swap_face(cached_face, t_scaled, out)
-                        except Exception:
-                            continue
-                else:
-                    if _source_imgs:
-                        fs_inputs = {
-                            "reference_vision_frame": frame,
-                            "source_vision_frames": _source_imgs,
-                            "target_vision_frame": frame,
-                            "temp_vision_frame": temp,
-                        }
-                    else:
-                        fs_inputs = {
-                            "reference_vision_frame": frame,
-                            "source_vision_frames": None,
-                            "target_vision_frame": frame,
-                            "temp_vision_frame": temp,
-                        }
-                    try:
-                        ff_face_swapper.pre_check()
-                    except Exception:
-                        pass
-                    out = ff_face_swapper.process_frame(fs_inputs)
-                    # face_swapper may return (frame, mask); extract frame
-                    try:
-                        if isinstance(out, tuple) and len(out) > 0:
-                            out = out[0]
-                    except Exception:
-                        pass
-            except Exception as e:
-                if debug_log:
-                    LOGGER.exception(f"[process_frame] face_swapper failed: {e}")
-                out = temp
-        else:
-            # Ensure deep swapper model/session exists; attempt lazy init if missing
-            try:
-                _ = deep_swapper.get_model_size()
-            except Exception as _e:
+        out = temp
+        if do_swap and faces and len(faces) > 0:
+            if swap_mode == "face":
+                # Prepare source frames from uploaded images if any
                 try:
+                    cached_face = _get_cached_source_face()
+                    if cached_face is not None:
+                        for target_face in faces:
+                            try:
+                                t_scaled = scale_face(target_face, frame, out)
+                                out = ff_face_swapper.swap_face(cached_face, t_scaled, out)
+                            except Exception:
+                                continue
+                    else:
+                        if _source_imgs:
+                            fs_inputs = {
+                                "reference_vision_frame": frame,
+                                "source_vision_frames": _source_imgs,
+                                "target_vision_frame": frame,
+                                "temp_vision_frame": out,
+                            }
+                        else:
+                            fs_inputs = {
+                                "reference_vision_frame": frame,
+                                "source_vision_frames": None,
+                                "target_vision_frame": frame,
+                                "temp_vision_frame": out,
+                            }
+                        try:
+                            ff_face_swapper.pre_check()
+                        except Exception:
+                            pass
+                        out = ff_face_swapper.process_frame(fs_inputs)
+                        # face_swapper may return (frame, mask); extract frame
+                        try:
+                            if isinstance(out, tuple) and len(out) > 0:
+                                out = out[0]
+                        except Exception:
+                            pass
+                except Exception as e:
                     if debug_log:
-                        LOGGER.info("[process_frame] deep_swapper not ready; running pre_check and clearing pool")
-                    if deep_swapper.pre_check():
-                        deep_swapper.clear_inference_pool()
-                except Exception:
-                    pass
-            out = deep_swapper.process_frame(inputs)
-            # deep_swapper returns (frame, mask); extract frame for display
-            try:
-                if isinstance(out, tuple) and len(out) > 0:
-                    out = out[0]
-            except Exception:
-                pass
+                        LOGGER.exception(f"[process_frame] face_swapper failed: {e}")
+                    out = temp
+            else:
+                # Deep swap path
+                try:
+                    _ = deep_swapper.get_model_size()
+                except Exception as _e:
+                    try:
+                        if debug_log:
+                            LOGGER.info("[process_frame] deep_swapper not ready; running pre_check and clearing pool")
+                        if deep_swapper.pre_check():
+                            deep_swapper.clear_inference_pool()
+                    except Exception:
+                        pass
+                # Build inputs only for deep swap
+                inputs = {
+                    "reference_vision_frame": frame,
+                    "target_vision_frame": frame,
+                    "temp_vision_frame": out,
+                }
+                try:
+                    out = deep_swapper.process_frame(inputs)
+                    if isinstance(out, tuple) and len(out) > 0:
+                        out = out[0]
+                except Exception as e:
+                    if debug_log:
+                        LOGGER.exception(f"[process_frame] deep swap failed: {e}")
+                    out = temp
         # Accept only non-empty numpy image outputs; otherwise, fall back
         if isinstance(out, np.ndarray) and getattr(out, 'size', 0) > 0:
             # Optional post processors that run in real-time
@@ -657,6 +662,7 @@ def process_frame(frame: VisionFrame, do_swap: bool, show_debug: bool = False, d
                             'reference_vision_frame': frame,
                             'target_vision_frame': frame,
                             'temp_vision_frame': out,
+                            'temp_vision_mask': None,
                         })
                         if isinstance(res, tuple) and len(res) > 0:
                             out = res[0]
@@ -674,6 +680,7 @@ def process_frame(frame: VisionFrame, do_swap: bool, show_debug: bool = False, d
                             'reference_vision_frame': frame,
                             'target_vision_frame': frame,
                             'temp_vision_frame': out,
+                            'temp_vision_mask': None,
                         })
                         if isinstance(res, tuple) and len(res) > 0:
                             out = res[0]
@@ -691,6 +698,7 @@ def process_frame(frame: VisionFrame, do_swap: bool, show_debug: bool = False, d
                             'reference_vision_frame': frame,
                             'target_vision_frame': frame,
                             'temp_vision_frame': out,
+                            'temp_vision_mask': None,
                         })
                         if isinstance(res, tuple) and len(res) > 0:
                             out = res[0]
@@ -709,6 +717,7 @@ def process_frame(frame: VisionFrame, do_swap: bool, show_debug: bool = False, d
                             'source_voice_frame': None,
                             'target_vision_frame': frame,
                             'temp_vision_frame': out,
+                            'temp_vision_mask': None,
                         })
                         if isinstance(res, tuple) and len(res) > 0:
                             out = res[0]
@@ -722,6 +731,7 @@ def process_frame(frame: VisionFrame, do_swap: bool, show_debug: bool = False, d
                             'reference_vision_frame': frame,
                             'target_vision_frame': frame,
                             'temp_vision_frame': out,
+                            'temp_vision_mask': None,
                         })
                         if isinstance(res, tuple) and len(res) > 0:
                             out = res[0]
@@ -1061,7 +1071,6 @@ def gr_stream(
     camera_choice: str,
     width: int,
     height: int,
-    do_deep_swap: bool,
     use_occlusion: bool,
     target_fps: float,
     backend_name: str,
@@ -1144,6 +1153,20 @@ def gr_stream(
             # Apply video memory strategy
             if video_memory_strategy in ("strict","moderate","relaxed"):
                 state_manager.set_item("video_memory_strategy", video_memory_strategy)
+            # Swap enablement is derived from swap_mode; no explicit deep_enabled state
+            # Initialize enabled processors on stream start
+            if state_manager.get_item('frame_colorizer_enabled'):
+                try: ff_frame_colorizer.pre_check()
+                except Exception: pass
+            if state_manager.get_item('expression_restorer_enabled'):
+                try: ff_expr_restorer.pre_check()
+                except Exception: pass
+            if state_manager.get_item('age_modifier_enabled'):
+                try: ff_age_modifier.pre_check()
+                except Exception: pass
+            if state_manager.get_item('face_editor_enabled'):
+                try: ff_face_editor.pre_check()
+                except Exception: pass
         except Exception:
             pass
 
@@ -1353,7 +1376,7 @@ def gr_stream(
             except Exception:
                 pass
 
-            processed = process_frame(frame, do_deep_swap, show_overlay, debug_logs, show_boxes)
+            processed = process_frame(frame, True, show_overlay, debug_logs, show_boxes)
             # If async enhancement is enabled, offload enhancers and display latest completed
             frame_out = processed if (isinstance(processed, np.ndarray) and getattr(processed, 'size', 0) > 0) else frame
             try:
@@ -1523,14 +1546,13 @@ def main() -> None:
             with gr.Tabs():
                 with gr.Tab("Swapping"):
                     with gr.Row("Face Swapper"):
-                        swap_mode = gr.Dropdown(choices=["deep","face"], value="deep", label="Swap Mode")
+                        swap_mode = gr.Dropdown(choices=["none","deep","face"], value="deep", label="Swap Mode")
                         source_files = gr.Files(label="Source Photos (for Face Swapper)", file_types=["image"], type="filepath")
                     with gr.Row():
                         fs_model = gr.Dropdown(choices=face_swapper_models, value=(face_swapper_models[0] if face_swapper_models else None), label="Face Swapper Model")
                         fs_pixel = gr.Dropdown(choices=proc_choices.face_swapper_set.get((face_swapper_models[0] if face_swapper_models else 'inswapper_128'), ["256x256"]) , value=(proc_choices.face_swapper_set.get((face_swapper_models[0] if face_swapper_models else 'inswapper_128'), ["256x256"]) [0]), label="Face Swapper Pixel Boost")
                         fs_weight = gr.Slider(minimum=0.0, maximum=1.0, step=0.05, value=0.5, label="Face Swapper Weight")
                     with gr.Row():
-                        deep_enabled = gr.Checkbox(value=True, label="Enable Deep Swap")
                         ds_model = gr.Dropdown(choices=deep_models, value="iperov/james_carrey_224", label="Deep Swapper Model")
                         morph = gr.Slider(minimum=0, maximum=100, step=1, value=args.morph, label="Morph")
                     
@@ -1941,12 +1963,6 @@ def main() -> None:
             video_mem.change(on_video_mem_change, inputs=video_mem, outputs=[])
 
             # Live toggles for key flags used per-frame
-            def on_deep_enabled_change(flag: bool):
-                try:
-                    state_manager.set_item('deep_enabled', bool(flag))
-                except Exception:
-                    pass
-            deep_enabled.change(on_deep_enabled_change, inputs=deep_enabled, outputs=[])
 
             def on_occl_enabled_change(flag: bool):
                 try:
@@ -1980,12 +1996,11 @@ def main() -> None:
             def on_swap_mode_change(mode: str):
                 try:
                     state_manager.set_item("swap_mode", mode)
-                    # If user selects 'face', disable deep swap; if 'deep', enable it
-                    return gr.update(value=(mode == 'deep'))
+                    return gr.update()
                 except Exception:
                     return gr.update()
 
-            swap_mode.change(on_swap_mode_change, inputs=swap_mode, outputs=deep_enabled)
+            swap_mode.change(on_swap_mode_change, inputs=swap_mode, outputs=[])
 
             def on_source_files_change(files):
                 try:
@@ -2084,7 +2099,7 @@ def main() -> None:
                 fn=gr_stream,
                 inputs=[
                     camera, width, height,
-                    deep_enabled, occl_enabled, fps, backend, dshow_name_drop, convert_rgb, force_fourcc, retry_black, gentle_mode, auto_repair, color_mode,
+                    occl_enabled, fps, backend, dshow_name_drop, convert_rgb, force_fourcc, retry_black, gentle_mode, auto_repair, color_mode,
                     lock_exposure, exposure_value, lock_wb, wb_temperature,
                     show_overlay, debug_logs, show_boxes,
                     show_native,
@@ -2106,10 +2121,16 @@ def main() -> None:
 
             # Auto-start on UI load
             def _gr_autostart(
-                camera_choice, width, height, deep_enabled, occl_enabled, fps, backend, dshow_name_drop, convert_rgb,
+                camera_choice, width, height, occl_enabled, fps, backend, dshow_name_drop, convert_rgb,
                 force_fourcc, retry_black, gentle_mode, auto_repair, color_mode, lock_exposure, exposure_value, lock_wb,
                 wb_temperature, show_overlay, debug_logs, show_boxes, show_native_flag,
                 colorizer_flag, expr_flag, age_flag, editor_flag, debugger_flag, lip_flag,
+                colorizer_model_v, colorizer_size_v, colorizer_blend_v,
+                expr_model_v, expr_factor_v, expr_areas_v,
+                age_model_v, age_direction_v,
+                editor_model_v, fe_eyebrow_dir_v, fe_eye_h_v, fe_eye_v_v, fe_eye_open_v, fe_lip_open_v, fe_mouth_smile_v, fe_head_pitch_v, fe_head_yaw_v, fe_head_roll_v,
+                dbg_items_v,
+                lip_model_v, lip_weight_v,
                 selector_mode_dd, auto_fallback, exec_provider,
                 exec_device, video_mem,
                 d_model, d_size, d_score, l_model, l_score, o_model, p_model, swap_mode, source_files,
@@ -2118,8 +2139,48 @@ def main() -> None:
             ):
                 if not auto_start_flag:
                     return None
+                # Apply initial defaults for processors so they work before any change
+                try:
+                    state_manager.set_item('frame_colorizer_model', colorizer_model_v)
+                    state_manager.set_item('frame_colorizer_size', colorizer_size_v)
+                    state_manager.set_item('frame_colorizer_blend', int(colorizer_blend_v))
+                except Exception:
+                    pass
+                try:
+                    state_manager.set_item('expression_restorer_model', expr_model_v)
+                    state_manager.set_item('expression_restorer_factor', int(expr_factor_v))
+                    state_manager.set_item('expression_restorer_areas', expr_areas_v)
+                except Exception:
+                    pass
+                try:
+                    state_manager.set_item('age_modifier_model', age_model_v)
+                    state_manager.set_item('age_modifier_direction', int(age_direction_v))
+                except Exception:
+                    pass
+                try:
+                    state_manager.set_item('face_editor_model', editor_model_v)
+                    state_manager.set_item('face_editor_eyebrow_direction', float(fe_eyebrow_dir_v))
+                    state_manager.set_item('face_editor_eye_gaze_horizontal', float(fe_eye_h_v))
+                    state_manager.set_item('face_editor_eye_gaze_vertical', float(fe_eye_v_v))
+                    state_manager.set_item('face_editor_eye_open_ratio', float(fe_eye_open_v))
+                    state_manager.set_item('face_editor_lip_open_ratio', float(fe_lip_open_v))
+                    state_manager.set_item('face_editor_mouth_smile', float(fe_mouth_smile_v))
+                    state_manager.set_item('face_editor_head_pitch', float(fe_head_pitch_v))
+                    state_manager.set_item('face_editor_head_yaw', float(fe_head_yaw_v))
+                    state_manager.set_item('face_editor_head_roll', float(fe_head_roll_v))
+                except Exception:
+                    pass
+                try:
+                    state_manager.set_item('face_debugger_items', dbg_items_v)
+                except Exception:
+                    pass
+                try:
+                    state_manager.set_item('lip_syncer_model', lip_model_v)
+                    state_manager.set_item('lip_syncer_weight', float(lip_weight_v))
+                except Exception:
+                    pass
                 yield from gr_stream(
-                    camera_choice, width, height, deep_enabled, occl_enabled, fps, backend, dshow_name_drop, convert_rgb,
+                    camera_choice, width, height, occl_enabled, fps, backend, dshow_name_drop, convert_rgb,
                     force_fourcc, retry_black, gentle_mode, auto_repair, color_mode, lock_exposure, exposure_value,
                     lock_wb, wb_temperature, show_overlay, debug_logs, show_boxes, show_native_flag,
                     colorizer_flag, expr_flag, age_flag, editor_flag, debugger_flag, lip_flag,
@@ -2133,10 +2194,16 @@ def main() -> None:
             demo.load(
                 fn=_gr_autostart,
                 inputs=[
-                    camera, width, height, deep_enabled, occl_enabled, fps, backend, dshow_name_drop, convert_rgb,
+                    camera, width, height, occl_enabled, fps, backend, dshow_name_drop, convert_rgb,
                     force_fourcc, retry_black, gentle_mode, auto_repair, color_mode, lock_exposure, exposure_value, lock_wb,
                     wb_temperature, show_overlay, debug_logs, show_boxes, show_native,
                     colorizer_enabled, expr_enabled, age_enabled, editor_enabled, debugger_enabled, lip_enabled,
+                    colorizer_model, colorizer_size, colorizer_blend,
+                    expr_model, expr_factor, expr_areas,
+                    age_model, age_direction,
+                    editor_model, fe_eyebrow_dir, fe_eye_h, fe_eye_v, fe_eye_open, fe_lip_open, fe_mouth_smile, fe_head_pitch, fe_head_yaw, fe_head_roll,
+                    dbg_items,
+                    lip_model, lip_weight,
                     selector_mode_dd, auto_fallback, exec_provider, exec_device, video_mem,
                     d_model, d_size, d_score, l_model, l_score, o_model, p_model, swap_mode, source_files,
                     ds_model, morph, fs_model, fs_pixel, fs_weight, face_enh_enabled, face_enh_model, face_enh_blend,
