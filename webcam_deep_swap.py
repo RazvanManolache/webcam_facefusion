@@ -56,11 +56,21 @@ from facefusion.filesystem import resolve_file_paths, get_file_name
 from facefusion.download import conditional_download_hashes, conditional_download_sources
 
 LOGGER = logging.getLogger("webcam_deep_swap")
+
+# Global cache for live face swapper sources
+_source_imgs = []
 if not LOGGER.handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
 _models_downloaded = False
+
+# Default fast startup to True to avoid redundant pre_check when models are present
+try:
+    if state_manager.get_item('fast_startup') is None:
+        state_manager.set_item('fast_startup', True)
+except Exception:
+    pass
 
 
 def ensure_models_downloaded() -> None:
@@ -68,18 +78,15 @@ def ensure_models_downloaded() -> None:
     if _models_downloaded:
         return
     try:
-        LOGGER.info("Preparing FaceFusion models (first run may download files)...")
+        if state_manager.get_item('fast_startup'):
+            _models_downloaded = True
+            return
+        else:
+            LOGGER.info("Preparing FaceFusion models (first run may download files)...")
         # Seed essential state so pre_check() knows what to fetch
         try:
             if state_manager.get_item("download_scope") is None:
                 state_manager.set_item("download_scope", "full")
-            if state_manager.get_item("download_providers") is None:
-                state_manager.set_item("download_providers", ["huggingface"])
-            if not state_manager.get_item("face_detector_model"):
-                state_manager.set_item("face_detector_model", "many")
-            if not state_manager.get_item("face_detector_size"):
-                sizes = ff_choices.face_detector_set.get("retinaface", ["640x640"]) or ["640x640"]
-                state_manager.set_item("face_detector_size", sizes[0])
             # Ensure margin exists as a 4-int list in 0..100
             if state_manager.get_item("face_detector_margin") is None:
                 state_manager.set_item("face_detector_margin", [0, 0, 0, 0])
@@ -647,14 +654,19 @@ def process_frame(frame: VisionFrame, do_swap: bool, show_debug: bool = False, d
             # Optional post processors that run in real-time
             try:
                 if state_manager.get_item('frame_colorizer_enabled'):
+                    # Run pre_check only once per session
                     try:
-                        ff_frame_colorizer.pre_check()
+                        if not state_manager.get_item('fast_startup') and not state_manager.get_item('frame_colorizer_ready'):
+                            if ff_frame_colorizer.pre_check():
+                                state_manager.set_item('frame_colorizer_ready', True)
                     except Exception:
                         pass
                     out = ff_frame_colorizer.colorize_frame(out)
                 if state_manager.get_item('expression_restorer_enabled'):
                     try:
-                        ff_expr_restorer.pre_check()
+                        if not state_manager.get_item('fast_startup') and not state_manager.get_item('expression_restorer_ready'):
+                            if ff_expr_restorer.pre_check():
+                                state_manager.set_item('expression_restorer_ready', True)
                     except Exception:
                         pass
                     try:
@@ -672,7 +684,9 @@ def process_frame(frame: VisionFrame, do_swap: bool, show_debug: bool = False, d
                         pass
                 if state_manager.get_item('age_modifier_enabled'):
                     try:
-                        ff_age_modifier.pre_check()
+                        if not state_manager.get_item('fast_startup') and not state_manager.get_item('age_modifier_ready'):
+                            if ff_age_modifier.pre_check():
+                                state_manager.set_item('age_modifier_ready', True)
                     except Exception:
                         pass
                     try:
@@ -690,7 +704,33 @@ def process_frame(frame: VisionFrame, do_swap: bool, show_debug: bool = False, d
                         pass
                 if state_manager.get_item('face_editor_enabled'):
                     try:
-                        ff_face_editor.pre_check()
+                        if not state_manager.get_item('fast_startup') and not state_manager.get_item('face_editor_ready'):
+                            if ff_face_editor.pre_check():
+                                state_manager.set_item('face_editor_ready', True)
+                    except Exception:
+                        LOGGER.exception("[process_frame] face_editor pre_check error")
+                    # Ensure all editor sliders are initialized to 0.0 to avoid NoneType errors
+                    try:
+                        _editor_keys = [
+                            'face_editor_eyebrow_direction',
+                            'face_editor_eye_gaze_horizontal',
+                            'face_editor_eye_gaze_vertical',
+                            'face_editor_eye_open_ratio',
+                            'face_editor_lip_open_ratio',
+                            'face_editor_mouth_smile',
+                            'face_editor_mouth_grim',
+                            'face_editor_mouth_pout',
+                            'face_editor_mouth_purse',
+                            'face_editor_mouth_position_horizontal',
+                            'face_editor_mouth_position_vertical',
+                            'face_editor_head_pitch',
+                            'face_editor_head_yaw',
+                            'face_editor_head_roll',
+                        ]
+                        for _k in _editor_keys:
+                            _v = state_manager.get_item(_k)
+                            if _v is None:
+                                state_manager.set_item(_k, 0.0)
                     except Exception:
                         pass
                     try:
@@ -700,15 +740,23 @@ def process_frame(frame: VisionFrame, do_swap: bool, show_debug: bool = False, d
                             'temp_vision_frame': out,
                             'temp_vision_mask': None,
                         })
+                        #LOGGER.info(f"[face_editor] res type={type(res)} is_tuple={isinstance(res, tuple)} is_ndarray={isinstance(res, np.ndarray)}")
                         if isinstance(res, tuple) and len(res) > 0:
                             out = res[0]
+                            #LOGGER.info("[process_frame] face_editor success tuple")
                         elif isinstance(res, np.ndarray):
                             out = res
-                    except Exception:
+                            #LOGGER.info("[process_frame] face_editor success ndarray")
+                        #else:
+                            #LOGGER.warning(f"[process_frame] face_editor returned unexpected type: {type(res)}")
+                    except Exception as e:
+                        LOGGER.exception(f"[process_frame] face_editor error: {e}")
                         pass
                 if state_manager.get_item('lip_syncer_enabled'):
                     try:
-                        ff_lip_syncer.pre_check()
+                        if not state_manager.get_item('fast_startup') and not state_manager.get_item('lip_syncer_ready'):
+                            if ff_lip_syncer.pre_check():
+                                state_manager.set_item('lip_syncer_ready', True)
                     except Exception:
                         pass
                     try:
@@ -1155,16 +1203,16 @@ def gr_stream(
                 state_manager.set_item("video_memory_strategy", video_memory_strategy)
             # Swap enablement is derived from swap_mode; no explicit deep_enabled state
             # Initialize enabled processors on stream start
-            if state_manager.get_item('frame_colorizer_enabled'):
+            if state_manager.get_item('frame_colorizer_enabled') and not state_manager.get_item('fast_startup'):
                 try: ff_frame_colorizer.pre_check()
                 except Exception: pass
-            if state_manager.get_item('expression_restorer_enabled'):
+            if state_manager.get_item('expression_restorer_enabled') and not state_manager.get_item('fast_startup'):
                 try: ff_expr_restorer.pre_check()
                 except Exception: pass
-            if state_manager.get_item('age_modifier_enabled'):
+            if state_manager.get_item('age_modifier_enabled') and not state_manager.get_item('fast_startup'):
                 try: ff_age_modifier.pre_check()
                 except Exception: pass
-            if state_manager.get_item('face_editor_enabled'):
+            if state_manager.get_item('face_editor_enabled') and not state_manager.get_item('fast_startup'):
                 try: ff_face_editor.pre_check()
                 except Exception: pass
         except Exception:
@@ -1587,6 +1635,7 @@ def main() -> None:
                         show_overlay = gr.Checkbox(value=False, label="Show detection overlay")
                         debug_logs = gr.Checkbox(value=True, label="Debug logs to console")
                         show_boxes = gr.Checkbox(value=False, label="Show detection boxes")
+                        fast_startup = gr.Checkbox(value=True, label="Fast Startup (skip model checks)")
            
                 with gr.Tab("Detection"):
                     with gr.Row():
@@ -1642,6 +1691,13 @@ def main() -> None:
                         fe_lip_open = gr.Slider(minimum=min(face_editor_choices.face_editor_lip_open_ratio_range), maximum=max(face_editor_choices.face_editor_lip_open_ratio_range), step=0.1, value=0.0, label="Lip Open")
                         fe_mouth_smile = gr.Slider(minimum=min(face_editor_choices.face_editor_mouth_smile_range), maximum=max(face_editor_choices.face_editor_mouth_smile_range), step=0.1, value=0.0, label="Smile")
                         fe_head_pitch = gr.Slider(minimum=min(face_editor_choices.face_editor_head_pitch_range), maximum=max(face_editor_choices.face_editor_head_pitch_range), step=0.1, value=0.0, label="Head Pitch")
+                    with gr.Row():
+                        fe_mouth_grim = gr.Slider(minimum=min(face_editor_choices.face_editor_mouth_grim_range), maximum=max(face_editor_choices.face_editor_mouth_grim_range), step=0.1, value=0.0, label="Mouth Grim")
+                        fe_mouth_pout = gr.Slider(minimum=min(face_editor_choices.face_editor_mouth_pout_range), maximum=max(face_editor_choices.face_editor_mouth_pout_range), step=0.1, value=0.0, label="Mouth Pout")
+                        fe_mouth_purse = gr.Slider(minimum=min(face_editor_choices.face_editor_mouth_purse_range), maximum=max(face_editor_choices.face_editor_mouth_purse_range), step=0.1, value=0.0, label="Mouth Purse")
+                    with gr.Row():
+                        fe_mouth_pos_h = gr.Slider(minimum=min(face_editor_choices.face_editor_mouth_position_horizontal_range), maximum=max(face_editor_choices.face_editor_mouth_position_horizontal_range), step=0.1, value=0.0, label="Mouth Pos H")
+                        fe_mouth_pos_v = gr.Slider(minimum=min(face_editor_choices.face_editor_mouth_position_vertical_range), maximum=max(face_editor_choices.face_editor_mouth_position_vertical_range), step=0.1, value=0.0, label="Mouth Pos V")
                     with gr.Row():
                         fe_head_yaw = gr.Slider(minimum=min(face_editor_choices.face_editor_head_yaw_range), maximum=max(face_editor_choices.face_editor_head_yaw_range), step=0.1, value=0.0, label="Head Yaw")
                         fe_head_roll = gr.Slider(minimum=min(face_editor_choices.face_editor_head_roll_range), maximum=max(face_editor_choices.face_editor_head_roll_range), step=0.1, value=0.0, label="Head Roll")
@@ -1909,6 +1965,11 @@ def main() -> None:
             fe_eye_open.change(lambda v: _set_float('face_editor_eye_open_ratio', v), inputs=fe_eye_open, outputs=[])
             fe_lip_open.change(lambda v: _set_float('face_editor_lip_open_ratio', v), inputs=fe_lip_open, outputs=[])
             fe_mouth_smile.change(lambda v: _set_float('face_editor_mouth_smile', v), inputs=fe_mouth_smile, outputs=[])
+            fe_mouth_grim.change(lambda v: _set_float('face_editor_mouth_grim', v), inputs=fe_mouth_grim, outputs=[])
+            fe_mouth_pout.change(lambda v: _set_float('face_editor_mouth_pout', v), inputs=fe_mouth_pout, outputs=[])
+            fe_mouth_purse.change(lambda v: _set_float('face_editor_mouth_purse', v), inputs=fe_mouth_purse, outputs=[])
+            fe_mouth_pos_h.change(lambda v: _set_float('face_editor_mouth_position_horizontal', v), inputs=fe_mouth_pos_h, outputs=[])
+            fe_mouth_pos_v.change(lambda v: _set_float('face_editor_mouth_position_vertical', v), inputs=fe_mouth_pos_v, outputs=[])
             fe_head_pitch.change(lambda v: _set_float('face_editor_head_pitch', v), inputs=fe_head_pitch, outputs=[])
             fe_head_yaw.change(lambda v: _set_float('face_editor_head_yaw', v), inputs=fe_head_yaw, outputs=[])
             fe_head_roll.change(lambda v: _set_float('face_editor_head_roll', v), inputs=fe_head_roll, outputs=[])
@@ -2015,9 +2076,58 @@ def main() -> None:
                             if isinstance(img, np.ndarray) and getattr(img, 'size', 0) > 0:
                                 _source_imgs.append(img)
                         except Exception:
+                            continue
+                except Exception:
+                    pass
+            source_files.change(on_source_files_change, inputs=source_files, outputs=[])
+
+            # Fast startup handler
+            def on_fast_startup_toggle(flag: bool):
+                try:
+                    state_manager.set_item('fast_startup', bool(flag))
+                except Exception:
+                    pass
+            fast_startup.change(on_fast_startup_toggle, inputs=fast_startup, outputs=[])
+
+            # Face Editor enable/disable in real time
+            def on_editor_toggle(flag: bool):
+                try:
+                    state_manager.set_item('face_editor_enabled', bool(flag))
+                    # Optional: warm up when enabling (unless fast startup)
+                    if flag and not state_manager.get_item('fast_startup'):
+                        try:
+                            if ff_face_editor.pre_check():
+                                state_manager.set_item('face_editor_ready', True)
+                        except Exception:
                             pass
                 except Exception:
                     pass
+            editor_enabled.change(on_editor_toggle, inputs=editor_enabled, outputs=[])
+
+            # Face swapper live handlers
+            def on_face_swapper_model_change(model: str):
+                try:
+                    state_manager.set_item("face_swapper_model", model)
+                    choices = proc_choices.face_swapper_set.get(model, ["256x256"]) or ["256x256"]
+                    _cleanup_inference()
+                    return gr.update(choices=choices, value=choices[0])
+                except Exception:
+                    return gr.update()
+            fs_model.change(on_face_swapper_model_change, inputs=fs_model, outputs=fs_pixel)
+
+            def on_face_swapper_pixel_change(pixel: str):
+                try:
+                    state_manager.set_item("face_swapper_pixel_boost", pixel)
+                except Exception:
+                    pass
+            fs_pixel.change(on_face_swapper_pixel_change, inputs=fs_pixel, outputs=[])
+
+            def on_face_swapper_weight_change(w: float):
+                try:
+                    state_manager.set_item("face_swapper_weight", float(w))
+                except Exception:
+                    pass
+            fs_weight.change(on_face_swapper_weight_change, inputs=fs_weight, outputs=[])
 
             def on_face_swapper_model_change(model: str):
                 try:
@@ -2123,7 +2233,7 @@ def main() -> None:
             def _gr_autostart(
                 camera_choice, width, height, occl_enabled, fps, backend, dshow_name_drop, convert_rgb,
                 force_fourcc, retry_black, gentle_mode, auto_repair, color_mode, lock_exposure, exposure_value, lock_wb,
-                wb_temperature, show_overlay, debug_logs, show_boxes, show_native_flag,
+                wb_temperature, show_overlay, debug_logs, show_boxes, show_native_flag, fast_startup_flag,
                 colorizer_flag, expr_flag, age_flag, editor_flag, debugger_flag, lip_flag,
                 colorizer_model_v, colorizer_size_v, colorizer_blend_v,
                 expr_model_v, expr_factor_v, expr_areas_v,
@@ -2139,6 +2249,10 @@ def main() -> None:
             ):
                 if not auto_start_flag:
                     return None
+                try:
+                    state_manager.set_item('fast_startup', bool(fast_startup_flag))
+                except Exception:
+                    pass
                 # Apply initial defaults for processors so they work before any change
                 try:
                     state_manager.set_item('frame_colorizer_model', colorizer_model_v)
@@ -2165,6 +2279,11 @@ def main() -> None:
                     state_manager.set_item('face_editor_eye_open_ratio', float(fe_eye_open_v))
                     state_manager.set_item('face_editor_lip_open_ratio', float(fe_lip_open_v))
                     state_manager.set_item('face_editor_mouth_smile', float(fe_mouth_smile_v))
+                    state_manager.set_item('face_editor_mouth_grim', float(state_manager.get_item('face_editor_mouth_grim') or 0.0))
+                    state_manager.set_item('face_editor_mouth_pout', float(state_manager.get_item('face_editor_mouth_pout') or 0.0))
+                    state_manager.set_item('face_editor_mouth_purse', float(state_manager.get_item('face_editor_mouth_purse') or 0.0))
+                    state_manager.set_item('face_editor_mouth_position_horizontal', float(state_manager.get_item('face_editor_mouth_position_horizontal') or 0.0))
+                    state_manager.set_item('face_editor_mouth_position_vertical', float(state_manager.get_item('face_editor_mouth_position_vertical') or 0.0))
                     state_manager.set_item('face_editor_head_pitch', float(fe_head_pitch_v))
                     state_manager.set_item('face_editor_head_yaw', float(fe_head_yaw_v))
                     state_manager.set_item('face_editor_head_roll', float(fe_head_roll_v))
@@ -2196,7 +2315,7 @@ def main() -> None:
                 inputs=[
                     camera, width, height, occl_enabled, fps, backend, dshow_name_drop, convert_rgb,
                     force_fourcc, retry_black, gentle_mode, auto_repair, color_mode, lock_exposure, exposure_value, lock_wb,
-                    wb_temperature, show_overlay, debug_logs, show_boxes, show_native,
+                    wb_temperature, show_overlay, debug_logs, show_boxes, show_native, fast_startup,
                     colorizer_enabled, expr_enabled, age_enabled, editor_enabled, debugger_enabled, lip_enabled,
                     colorizer_model, colorizer_size, colorizer_blend,
                     expr_model, expr_factor, expr_areas,
