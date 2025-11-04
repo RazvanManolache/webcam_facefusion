@@ -1,0 +1,3 @@
+[submodule "facefusion_mrg"]
+	path = facefusion_mrg
+	url = https://github.com/RazvanManolache/facefusion_mrg/
