@@ -1636,6 +1636,7 @@ def main() -> None:
     parser = argparse.ArgumentParser("Webcam Deep Swap (FaceFusion reuse)")
     parser.add_argument("--gui", action="store_true", help="Launch Gradio GUI")
     parser.add_argument("--list-cams", action="store_true", help="List available camera indices and exit")
+    parser.add_argument("--headless", action="store_true", help="Run without GUI, process pipeline and (optionally) output to virtual camera")
     parser.add_argument("--camera", type=int, default=0, help="Camera index to open")
     parser.add_argument(
         "--model",
@@ -1647,8 +1648,312 @@ def main() -> None:
     parser.add_argument("--morph", type=int, default=100, help="Morph value [0-100] for deep swapper")
     parser.add_argument("--width", type=int, default=1920, help="Capture width")
     parser.add_argument("--height", type=int, default=1080, help="Capture height")
+    # Extended CLI for UI parity
+    parser.add_argument("--ep", dest="ep", type=str, help="Execution provider key (cuda/directml/cpu)")
+    parser.add_argument("--device", dest="device", type=str, help="Execution device id (e.g. 0)")
+    parser.add_argument("--video-mem", dest="video_mem", type=str, choices=["strict","moderate","relaxed"], help="Video memory strategy")
+    # Camera and capture
+    parser.add_argument("--backend", type=str, help="Camera backend (Media Foundation/DirectShow/OpenCV)")
+    parser.add_argument("--resolution", type=str, help="Resolution preset like 1280x720")
+    parser.add_argument("--fps", type=float, help="Target FPS")
+    parser.add_argument("--dshow-name", dest="dshow_name", type=str, help="DirectShow device name")
+    parser.add_argument("--convert-rgb", action="store_true", help="Force convert RGB at capture")
+    parser.add_argument("--fourcc", type=str, help="Force FOURCC (e.g., MJPG/YUY2)")
+    parser.add_argument("--retry-black", type=int, help="Retry count when frames are black")
+    parser.add_argument("--gentle", action="store_true", help="Gentle mode for reopen/retry")
+    parser.add_argument("--auto-repair", action="store_true", help="Enable auto-repair stream")
+    parser.add_argument("--color-mode", type=str, help="Color mode (Auto (BGR->RGB) / Assume RGB [...])")
+    parser.add_argument("--lock-exposure", action="store_true", help="Lock exposure")
+    parser.add_argument("--exposure", type=float, help="Exposure value when locked")
+    parser.add_argument("--lock-wb", action="store_true", help="Lock white balance")
+    parser.add_argument("--wb-temp", type=int, help="White balance temperature")
+    parser.add_argument("--show-overlay", action="store_true", help="Show detection overlay")
+    parser.add_argument("--debug-logs", action="store_true", help="Enable debug logs")
+    parser.add_argument("--show-boxes", action="store_true", help="Show detection boxes")
+    parser.add_argument("--show-native", action="store_true", help="Show native window")
+    parser.add_argument("--virtual-cam", action="store_true", help="Enable virtual camera output")
+    # Swapping
+    parser.add_argument("--swap-mode", type=str, choices=["none","deep","face"], help="Swap mode")
+    parser.add_argument("--face-swapper-model", dest="face_swapper_model", type=str, help="Face swapper model")
+    parser.add_argument("--face-swapper-pixel", dest="face_swapper_pixel", type=str, help="Face swapper pixel boost")
+    parser.add_argument("--face-swapper-weight", dest="face_swapper_weight", type=float, help="Face swapper weight")
+    parser.add_argument("--source", action="append", dest="source_paths", help="Face Swapper source image (repeat)")
+    # Detection
+    parser.add_argument("--detector-model", type=str, help="Detector model")
+    parser.add_argument("--detector-size", type=str, help="Detector input size WxH")
+    parser.add_argument("--detector-score", type=float, help="Detector score threshold")
+    parser.add_argument("--selector-mode", type=str, choices=["one","many"], help="Selector mode")
+    parser.add_argument("--auto-fallback", action="store_true", help="Enable auto fallback for detector")
+    parser.add_argument("--landmarker-model", type=str, help="Landmarker model")
+    parser.add_argument("--landmarker-score", type=float, help="Landmarker score threshold")
+    parser.add_argument("--occluder-model", type=str, help="Occluder model")
+    parser.add_argument("--parser-model", type=str, help="Parser model")
+    # Enhancing & processors toggles and settings
+    parser.add_argument("--face-enhancer", action="store_true", help="Enable face enhancer")
+    parser.add_argument("--face-enhancer-model", type=str, help="Face enhancer model")
+    parser.add_argument("--face-enhancer-blend", type=int, help="Face enhancer blend")
+    parser.add_argument("--face-enhancer-weight", type=float, help="Face enhancer weight")
+    parser.add_argument("--frame-enhancer", action="store_true", help="Enable frame enhancer")
+    parser.add_argument("--frame-enhancer-model", type=str, help="Frame enhancer model")
+    parser.add_argument("--frame-enhancer-blend", type=int, help="Frame enhancer blend")
+    parser.add_argument("--enhance-async", action="store_true", help="Enable async enhance")
+    parser.add_argument("--colorizer", action="store_true", help="Enable frame colorizer")
+    parser.add_argument("--colorizer-model", type=str, help="Colorizer model")
+    parser.add_argument("--colorizer-size", type=str, help="Colorizer size")
+    parser.add_argument("--colorizer-blend", type=int, help="Colorizer blend")
+    parser.add_argument("--expr", action="store_true", help="Enable expression restorer")
+    parser.add_argument("--expr-model", type=str, help="Expression restorer model")
+    parser.add_argument("--expr-factor", type=int, help="Expression restorer factor")
+    parser.add_argument("--expr-area", action="append", dest="expr_areas", help="Expression restorer area (repeat)")
+    parser.add_argument("--age-mod", action="store_true", help="Enable age modifier")
+    parser.add_argument("--age-model", type=str, help="Age modifier model")
+    parser.add_argument("--age-direction", type=int, help="Age modifier direction")
+    parser.add_argument("--editor", action="store_true", help="Enable face editor")
+    parser.add_argument("--editor-model", type=str, help="Face editor model")
+    parser.add_argument("--fe-eyebrow-dir", type=float, help="Face editor eyebrow direction")
+    parser.add_argument("--fe-eye-h", type=float, help="Face editor eye gaze horizontal")
+    parser.add_argument("--fe-eye-v", type=float, help="Face editor eye gaze vertical")
+    parser.add_argument("--fe-eye-open", type=float, help="Face editor eye open ratio")
+    parser.add_argument("--fe-lip-open", type=float, help="Face editor lip open ratio")
+    parser.add_argument("--fe-smile", type=float, help="Face editor mouth smile")
+    parser.add_argument("--fe-head-pitch", type=float, help="Face editor head pitch")
+    parser.add_argument("--fe-head-yaw", type=float, help="Face editor head yaw")
+    parser.add_argument("--fe-head-roll", type=float, help="Face editor head roll")
+    parser.add_argument("--face-debugger", action="store_true", help="Enable face debugger")
+    parser.add_argument("--face-debugger-item", action="append", dest="face_debugger_items", help="Debugger item (repeat)")
+    parser.add_argument("--lip-syncer", action="store_true", help="Enable lip syncer")
+    parser.add_argument("--lip-model", type=str, help="Lip syncer model")
+    parser.add_argument("--lip-weight", type=float, help="Lip syncer weight")
 
     args = parser.parse_args()
+
+    # Apply CLI overrides into preferences prior to GUI build
+    def _apply_cli_overrides():
+        ov = {}
+        # General
+        if args.ep: ov['execution_providers'] = [args.ep]
+        if args.device: ov['execution_device_ids'] = [str(args.device)]
+        if args.video_mem: ov['video_memory_strategy'] = args.video_mem
+        # Camera
+        if args.backend: ov['backend'] = args.backend
+        if args.resolution: ov['resolution_preset'] = args.resolution
+        if args.width is not None: ov['width'] = int(args.width)
+        if args.height is not None: ov['height'] = int(args.height)
+        if args.fps is not None: ov['fps'] = float(args.fps)
+        if args.dshow_name: ov['dshow_name_device'] = args.dshow_name
+        if args.convert_rgb: ov['convert_rgb'] = True
+        if args.fourcc: ov['force_fourcc'] = args.fourcc
+        if args.retry_black is not None: ov['retry_black'] = int(args.retry_black)
+        if args.gentle: ov['gentle_mode'] = True
+        if args.auto_repair: ov['auto_repair'] = True
+        if args.color_mode: ov['color_mode'] = args.color_mode
+        if args.lock_exposure: ov['lock_exposure'] = True
+        if args.exposure is not None: ov['exposure_value'] = float(args.exposure)
+        if args.lock_wb: ov['lock_wb'] = True
+        if args.wb_temp is not None: ov['wb_temperature'] = int(args.wb_temp)
+        if args.show_overlay: ov['show_overlay'] = True
+        if args.debug_logs: ov['debug_logs'] = True
+        if args.show_boxes: ov['show_boxes'] = True
+        if args.show_native: ov['show_native'] = True
+        if args.virtual_cam: ov['virtual_cam_enabled'] = True
+        # Swapping
+        if args.swap_mode: ov['swap_mode'] = args.swap_mode
+        if args.face_swapper_model: ov['face_swapper_model'] = args.face_swapper_model
+        if args.face_swapper_pixel: ov['face_swapper_pixel_boost'] = args.face_swapper_pixel
+        if args.face_swapper_weight is not None: ov['face_swapper_weight'] = float(args.face_swapper_weight)
+        if args.model: ov['deep_swapper_model'] = args.model
+        if args.morph is not None: ov['morph'] = int(args.morph)
+        if getattr(args, 'source_paths', None): ov['source_paths'] = list(args.source_paths)
+        # Detection
+        if args.detector_model: ov['detector_model'] = args.detector_model
+        if args.detector_size: ov['detector_size'] = args.detector_size
+        if args.detector_score is not None: ov['detector_score'] = float(args.detector_score)
+        if args.selector_mode: ov['selector_mode'] = args.selector_mode
+        if args.auto_fallback: ov['auto_fallback'] = True
+        if args.landmarker_model: ov['landmarker_model'] = args.landmarker_model
+        if args.landmarker_score is not None: ov['landmarker_score'] = float(args.landmarker_score)
+        if args.occluder_model: ov['occluder_model'] = args.occluder_model
+        if args.parser_model: ov['parser_model'] = args.parser_model
+        # Enhancers/processors
+        if args.face_enhancer: ov['face_enhancer_enabled'] = True
+        if args.face_enhancer_model: ov['face_enhancer_model'] = args.face_enhancer_model
+        if args.face_enhancer_blend is not None: ov['face_enhancer_blend'] = int(args.face_enhancer_blend)
+        if args.face_enhancer_weight is not None: ov['face_enhancer_weight'] = float(args.face_enhancer_weight)
+        if args.frame_enhancer: ov['frame_enhancer_enabled'] = True
+        if args.frame_enhancer_model: ov['frame_enhancer_model'] = args.frame_enhancer_model
+        if args.frame_enhancer_blend is not None: ov['frame_enhancer_blend'] = int(args.frame_enhancer_blend)
+        if args.enhance_async: ov['enhance_async'] = True
+        if args.colorizer: ov['frame_colorizer_enabled'] = True
+        if args.colorizer_model: ov['frame_colorizer_model'] = args.colorizer_model
+        if args.colorizer_size: ov['frame_colorizer_size'] = args.colorizer_size
+        if args.colorizer_blend is not None: ov['frame_colorizer_blend'] = int(args.colorizer_blend)
+        if args.expr: ov['expression_restorer_enabled'] = True
+        if args.expr_model: ov['expression_restorer_model'] = args.expr_model
+        if args.expr_factor is not None: ov['expression_restorer_factor'] = int(args.expr_factor)
+        if getattr(args, 'expr_areas', None): ov['expression_restorer_areas'] = list(args.expr_areas)
+        if args.age_mod: ov['age_modifier_enabled'] = True
+        if args.age_model: ov['age_modifier_model'] = args.age_model
+        if args.age_direction is not None: ov['age_modifier_direction'] = int(args.age_direction)
+        if args.editor: ov['face_editor_enabled'] = True
+        if args.editor_model: ov['face_editor_model'] = args.editor_model
+        for k, v in {
+            'face_editor_eyebrow_direction': args.fe_eyebrow_dir,
+            'face_editor_eye_gaze_horizontal': args.fe_eye_h,
+            'face_editor_eye_gaze_vertical': args.fe_eye_v,
+            'face_editor_eye_open_ratio': args.fe_eye_open,
+            'face_editor_lip_open_ratio': args.fe_lip_open,
+            'face_editor_mouth_smile': args.fe_smile,
+            'face_editor_head_pitch': args.fe_head_pitch,
+            'face_editor_head_yaw': args.fe_head_yaw,
+            'face_editor_head_roll': args.fe_head_roll,
+        }.items():
+            if v is not None:
+                ov[k] = float(v)
+        if args.face_debugger: ov['face_debugger_enabled'] = True
+        if getattr(args, 'face_debugger_items', None): ov['face_debugger_items'] = list(args.face_debugger_items)
+        if args.lip_syncer: ov['lip_syncer_enabled'] = True
+        if args.lip_model: ov['lip_syncer_model'] = args.lip_model
+        if args.lip_weight is not None: ov['lip_syncer_weight'] = float(args.lip_weight)
+        # Occlusion (default true); handled via --no-occlusion from existing flag
+        if args.no_occlusion: ov['use_occlusion'] = False
+        # Persist overrides
+        if ov:
+            prefs = _load_prefs().copy()
+            prefs.update(ov)
+            _save_prefs(prefs)
+            for k, v in ov.items():
+                try:
+                    state_manager.set_item(k, v)
+                except Exception:
+                    pass
+
+    _apply_cli_overrides()
+
+    # Headless mode (no GUI): run processing loop and optionally output to virtual camera
+    if args.headless and not args.list_cams:
+        try:
+            prefs = _load_prefs().copy()
+            # Minimal state priming from prefs
+            for k in [
+                'execution_providers','execution_device_ids','video_memory_strategy',
+                'detector_model','detector_size','detector_score','selector_mode','auto_fallback',
+                'landmarker_model','landmarker_score','occluder_model','parser_model',
+                'swap_mode','deep_swapper_model','morph','face_swapper_model','face_swapper_pixel_boost','face_swapper_weight',
+                'frame_colorizer_enabled','frame_colorizer_model','frame_colorizer_size','frame_colorizer_blend',
+                'expression_restorer_enabled','expression_restorer_model','expression_restorer_factor','expression_restorer_areas',
+                'age_modifier_enabled','age_modifier_model','age_modifier_direction',
+                'face_editor_enabled','face_editor_model',
+                'face_debugger_enabled','face_debugger_items',
+                'lip_syncer_enabled','lip_syncer_model','lip_syncer_weight',
+                'face_enhancer_enabled','face_enhancer_model','face_enhancer_blend','face_enhancer_weight',
+                'frame_enhancer_enabled','frame_enhancer_model','frame_enhancer_blend','enhance_async',
+            ]:
+                if k in prefs:
+                    try: state_manager.set_item(k, prefs[k])
+                    except Exception: pass
+            # Gather inputs for gr_stream from prefs
+            camera_choice = prefs.get('camera_choice', "[0] Camera 0")
+            width = int(prefs.get('width', 1920))
+            height = int(prefs.get('height', 1080))
+            use_occlusion = bool(prefs.get('use_occlusion', True))
+            fps = float(prefs.get('fps', 15.0))
+            backend = prefs.get('backend', 'Media Foundation')
+            dshow_name = prefs.get('dshow_name_device', prefs.get('dshow_name_text', None))
+            convert_rgb = bool(prefs.get('convert_rgb', True))
+            fourcc = prefs.get('force_fourcc', 'Auto')
+            retry_black = int(prefs.get('retry_black', 3))
+            gentle_mode = bool(prefs.get('gentle_mode', True))
+            auto_repair = bool(prefs.get('auto_repair', True))
+            color_mode = prefs.get('color_mode', 'Auto (BGR->RGB)')
+            lock_exp = bool(prefs.get('lock_exposure', True))
+            exposure_val = float(prefs.get('exposure_value', -6.0))
+            lock_wb = bool(prefs.get('lock_wb', True))
+            wb_temp = int(prefs.get('wb_temperature', 4500))
+            show_overlay = bool(prefs.get('show_overlay', False))
+            debug_logs = bool(prefs.get('debug_logs', True))
+            show_boxes = bool(prefs.get('show_boxes', False))
+            show_native = bool(prefs.get('show_native', True))
+            virtual_cam_enabled = bool(prefs.get('virtual_cam_enabled', False))
+            # Downstream flags
+            selector_mode_v = prefs.get('selector_mode', 'one')
+            auto_fallback_v = bool(prefs.get('auto_fallback', True))
+            exec_provider_key = (prefs.get('execution_providers') or ['cpu'])[0]
+            exec_device_id = (prefs.get('execution_device_ids') or ['0'])[0]
+            video_mem_val = prefs.get('video_memory_strategy', 'moderate')
+            d_model_v = prefs.get('detector_model', 'retinaface')
+            d_size_v = prefs.get('detector_size', '160x160')
+            d_score_v = float(prefs.get('detector_score', 0.5))
+            l_model_v = prefs.get('landmarker_model', 'many')
+            l_score_v = float(prefs.get('landmarker_score', 0.5))
+            o_model_v = prefs.get('occluder_model', 'xseg_2')
+            p_model_v = prefs.get('parser_model', None)
+            swap_mode_v = prefs.get('swap_mode', 'deep')
+            ds_model_v = prefs.get('deep_swapper_model', 'iperov/james_carrey_224')
+            morph_v = int(prefs.get('morph', 100))
+            fs_model_v = prefs.get('face_swapper_model', None)
+            fs_pixel_v = prefs.get('face_swapper_pixel_boost', None)
+            fs_weight_v = float(prefs.get('face_swapper_weight', 0.5))
+            face_enh_enabled_v = bool(prefs.get('face_enhancer_enabled', False))
+            face_enh_model_v = prefs.get('face_enhancer_model', None)
+            face_enh_bl_v = int(prefs.get('face_enhancer_blend', 80))
+            face_enh_w_v = float(prefs.get('face_enhancer_weight', 0.5))
+            frame_enh_enabled_v = bool(prefs.get('frame_enhancer_enabled', False))
+            frame_enh_model_v = prefs.get('frame_enhancer_model', None)
+            frame_enh_bl_v = int(prefs.get('frame_enhancer_blend', 80))
+            enhance_async_v = bool(prefs.get('enhance_async', True))
+            colorizer_enabled_v = bool(prefs.get('frame_colorizer_enabled', False))
+            colorizer_model_v = prefs.get('frame_colorizer_model', None)
+            colorizer_size_v = prefs.get('frame_colorizer_size', None)
+            colorizer_blend_v = int(prefs.get('frame_colorizer_blend', 100))
+            expr_enabled_v = bool(prefs.get('expression_restorer_enabled', False))
+            expr_model_v = prefs.get('expression_restorer_model', None)
+            expr_factor_v = int(prefs.get('expression_restorer_factor', 80))
+            expr_areas_v = prefs.get('expression_restorer_areas', [])
+            age_enabled_v = bool(prefs.get('age_modifier_enabled', False))
+            age_model_v = prefs.get('age_modifier_model', None)
+            age_direction_v = int(prefs.get('age_modifier_direction', 0))
+            editor_enabled_v = bool(prefs.get('face_editor_enabled', False))
+            editor_model_v = prefs.get('face_editor_model', None)
+            # Face editor sliders default 0.0
+            fe_defaults = lambda k: float(prefs.get(k, 0.0))
+            fe_eyebrow_dir_v = fe_defaults('face_editor_eyebrow_direction')
+            fe_eye_h_v = fe_defaults('face_editor_eye_gaze_horizontal')
+            fe_eye_v_v = fe_defaults('face_editor_eye_gaze_vertical')
+            fe_eye_open_v = fe_defaults('face_editor_eye_open_ratio')
+            fe_lip_open_v = fe_defaults('face_editor_lip_open_ratio')
+            fe_mouth_smile_v = fe_defaults('face_editor_mouth_smile')
+            fe_head_pitch_v = fe_defaults('face_editor_head_pitch')
+            fe_head_yaw_v = fe_defaults('face_editor_head_yaw')
+            fe_head_roll_v = fe_defaults('face_editor_head_roll')
+            dbg_enabled_v = bool(prefs.get('face_debugger_enabled', False))
+            dbg_items_v = prefs.get('face_debugger_items', [])
+            lip_enabled_v = bool(prefs.get('lip_syncer_enabled', False))
+            lip_model_v = prefs.get('lip_syncer_model', None)
+            lip_weight_v = float(prefs.get('lip_syncer_weight', 0.5))
+
+            # Iterate frames from gr_stream; virtual camera sending is handled inside gr_stream when enabled
+            for _ in gr_stream(
+                camera_choice, width, height,
+                use_occlusion, fps, backend, dshow_name or "", convert_rgb, fourcc, retry_black, gentle_mode, auto_repair, color_mode,
+                lock_exp, exposure_val, lock_wb, wb_temp,
+                show_overlay, debug_logs, show_boxes,
+                show_native, virtual_cam_enabled,
+                colorizer_enabled_v, expr_enabled_v, age_enabled_v, editor_enabled_v, dbg_enabled_v, lip_enabled_v,
+                selector_mode_v, auto_fallback_v,
+                exec_provider_key, str(exec_device_id), video_mem_val,
+                d_model_v, d_size_v, d_score_v, l_model_v, l_score_v, o_model_v, p_model_v,
+                swap_mode_v, [], ds_model_v, morph_v,
+                fs_model_v, fs_pixel_v, fs_weight_v,
+                face_enh_enabled_v, face_enh_model_v, face_enh_bl_v, face_enh_w_v,
+                frame_enh_enabled_v, frame_enh_model_v, frame_enh_bl_v,
+                enhance_async_v
+            ):
+                # In headless mode we don't yield anywhere; sleep is inside gr_stream
+                pass
+        except KeyboardInterrupt:
+            try: gr_stop_stream()
+            except Exception: pass
+        return
 
     if args.gui:
         choices = get_model_choices()
@@ -1806,6 +2111,176 @@ def main() -> None:
                 auto_start = gr.Checkbox(value=True, label="Auto-start stream")
             out = gr.Image(label="Output", streaming=True)
             diag = gr.Textbox(label="Diagnostics", lines=6)
+
+            # CLI Preview tab
+            with gr.Tab("CLI"):
+                cli_box = gr.Textbox(label="CLI Command", lines=6, interactive=False, show_copy_button=True)
+
+            def _build_cli_command(
+                exec_provider_key, exec_device_id, video_mem_val,
+                backend_name, camera_choice_v, res_v, width_v, height_v, fps_v,
+                dshow_dev, dshow_name_text_v, convert_rgb_v, fourcc_v, retry_black_v, gentle_v, auto_repair_v, color_mode_v,
+                lock_exp_v, exposure_v, lock_wb_v, wb_temp_v, show_overlay_v, debug_logs_v, show_boxes_v, show_native_v, virtual_cam_v,
+                swap_mode_v, fs_model_v, fs_pixel_v, fs_weight_v, ds_model_v, morph_v,
+                d_model_v, d_size_v, d_score_v, selector_mode_v, auto_fallback_v, l_model_v, l_score_v, o_model_v, p_model_v,
+                use_occlusion_v,
+                face_enh_en, face_enh_mod, face_enh_bl, face_enh_w,
+                frame_enh_en, frame_enh_mod, frame_enh_bl, enhance_async_v,
+                colorizer_en, colorizer_mod, colorizer_sz, colorizer_bl,
+                expr_en, expr_mod, expr_factor_v, expr_areas_v,
+                age_en, age_mod, age_dir_v,
+                editor_en, editor_mod,
+                fe_eyebrow_dir_v, fe_eye_h_v, fe_eye_v_v, fe_eye_open_v,
+                fe_lip_open_v, fe_mouth_smile_v, fe_head_pitch_v,
+                fe_head_yaw_v, fe_head_roll_v,
+                dbg_en, dbg_items_v,
+                lip_en, lip_mod, lip_weight_v,
+                source_files_v,
+            ):
+                parts = ["python", os.path.basename(__file__)]
+                # General/exec
+                if exec_provider_key: parts += ["--ep", str(exec_provider_key)]
+                if exec_device_id: parts += ["--device", str(exec_device_id)]
+                if video_mem_val: parts += ["--video-mem", str(video_mem_val)]
+                # Camera
+                if backend_name: parts += ["--backend", f"{backend_name}"]
+                if camera_choice_v and camera_choice_v.startswith("["):
+                    try:
+                        cam_index = int(camera_choice_v.split(']')[0][1:])
+                        parts += ["--camera", str(cam_index)]
+                    except Exception:
+                        pass
+                if res_v and res_v.lower() != "custom": parts += ["--resolution", res_v]
+                if width_v: parts += ["--width", str(int(width_v))]
+                if height_v: parts += ["--height", str(int(height_v))]
+                if fps_v: parts += ["--fps", str(int(float(fps_v)))]
+                if dshow_dev: parts += ["--dshow-name", f"{dshow_dev}"]
+                if dshow_name_text_v: parts += ["--dshow-name", f"{dshow_name_text_v}"]
+                if convert_rgb_v: parts.append("--convert-rgb")
+                if fourcc_v and str(fourcc_v).lower() != "auto": parts += ["--fourcc", str(fourcc_v)]
+                if retry_black_v: parts += ["--retry-black", str(int(retry_black_v))]
+                if gentle_v: parts.append("--gentle")
+                if auto_repair_v: parts.append("--auto-repair")
+                if color_mode_v: parts += ["--color-mode", f"{color_mode_v}"]
+                if lock_exp_v: parts.append("--lock-exposure")
+                if exposure_v is not None: parts += ["--exposure", str(float(exposure_v))]
+                if lock_wb_v: parts.append("--lock-wb")
+                if wb_temp_v: parts += ["--wb-temp", str(int(wb_temp_v))]
+                if show_overlay_v: parts.append("--show-overlay")
+                if debug_logs_v: parts.append("--debug-logs")
+                if show_boxes_v: parts.append("--show-boxes")
+                if show_native_v: parts.append("--show-native")
+                if virtual_cam_v: parts.append("--virtual-cam")
+                # Swapping
+                if swap_mode_v: parts += ["--swap-mode", swap_mode_v]
+                if fs_model_v: parts += ["--face-swapper-model", fs_model_v]
+                if fs_pixel_v: parts += ["--face-swapper-pixel", fs_pixel_v]
+                if fs_weight_v is not None: parts += ["--face-swapper-weight", str(float(fs_weight_v))]
+                if ds_model_v: parts += ["--model", ds_model_v]
+                if morph_v is not None: parts += ["--morph", str(int(morph_v))]
+                if source_files_v:
+                    try:
+                        for p in (source_files_v or []):
+                            if isinstance(p, str) and p:
+                                parts += ["--source", p]
+                    except Exception:
+                        pass
+                # Detection
+                if d_model_v: parts += ["--detector-model", d_model_v]
+                if d_size_v: parts += ["--detector-size", d_size_v]
+                if d_score_v is not None: parts += ["--detector-score", str(float(d_score_v))]
+                if selector_mode_v: parts += ["--selector-mode", selector_mode_v]
+                if auto_fallback_v: parts.append("--auto-fallback")
+                if l_model_v: parts += ["--landmarker-model", l_model_v]
+                if l_score_v is not None: parts += ["--landmarker-score", str(float(l_score_v))]
+                if o_model_v: parts += ["--occluder-model", o_model_v]
+                if p_model_v: parts += ["--parser-model", p_model_v]
+                # Use occlusion defaults to true; add --no-occlusion when false
+                if isinstance(use_occlusion_v, bool) and not use_occlusion_v:
+                    parts.append("--no-occlusion")
+                # Enhancing / processors
+                if face_enh_en: parts.append("--face-enhancer")
+                if face_enh_mod: parts += ["--face-enhancer-model", face_enh_mod]
+                if face_enh_bl is not None: parts += ["--face-enhancer-blend", str(int(face_enh_bl))]
+                if face_enh_w is not None: parts += ["--face-enhancer-weight", str(float(face_enh_w))]
+                if frame_enh_en: parts.append("--frame-enhancer")
+                if frame_enh_mod: parts += ["--frame-enhancer-model", frame_enh_mod]
+                if frame_enh_bl is not None: parts += ["--frame-enhancer-blend", str(int(frame_enh_bl))]
+                if enhance_async_v: parts.append("--enhance-async")
+                if colorizer_en: parts.append("--colorizer")
+                if colorizer_mod: parts += ["--colorizer-model", colorizer_mod]
+                if colorizer_sz: parts += ["--colorizer-size", colorizer_sz]
+                if colorizer_bl is not None: parts += ["--colorizer-blend", str(int(colorizer_bl))]
+                if expr_en: parts.append("--expr")
+                if expr_mod: parts += ["--expr-model", expr_mod]
+                if expr_factor_v is not None: parts += ["--expr-factor", str(int(expr_factor_v))]
+                if expr_areas_v: 
+                    for a in (expr_areas_v or []):
+                        parts += ["--expr-area", a]
+                if age_en: parts.append("--age-mod")
+                if age_mod: parts += ["--age-model", age_mod]
+                if age_dir_v is not None: parts += ["--age-direction", str(int(age_dir_v))]
+                if editor_en: parts.append("--editor")
+                if editor_mod: parts += ["--editor-model", editor_mod]
+                # Face editor sliders (emit only when non-zero to keep concise)
+                def add_slider(flag, val):
+                    try:
+                        v = float(val)
+                        if abs(v) > 1e-9:
+                            parts += [flag, str(v)]
+                    except Exception:
+                        pass
+                add_slider("--fe-eyebrow-dir", fe_eyebrow_dir_v)
+                add_slider("--fe-eye-h", fe_eye_h_v)
+                add_slider("--fe-eye-v", fe_eye_v_v)
+                add_slider("--fe-eye-open", fe_eye_open_v)
+                add_slider("--fe-lip-open", fe_lip_open_v)
+                add_slider("--fe-smile", fe_mouth_smile_v)
+                add_slider("--fe-head-pitch", fe_head_pitch_v)
+                add_slider("--fe-head-yaw", fe_head_yaw_v)
+                add_slider("--fe-head-roll", fe_head_roll_v)
+                if dbg_en: parts.append("--face-debugger")
+                if dbg_items_v:
+                    for it in (dbg_items_v or []):
+                        parts += ["--face-debugger-item", it]
+                if lip_en: parts.append("--lip-syncer")
+                if lip_mod: parts += ["--lip-model", lip_mod]
+                if lip_weight_v is not None: parts += ["--lip-weight", str(float(lip_weight_v))]
+                return " ".join(parts)
+
+            # Wire CLI preview updates
+            cli_inputs = [
+                exec_provider, exec_device, video_mem,
+                backend, camera, res, width, height, fps,
+                dshow_name_drop, dshow_name, convert_rgb, force_fourcc, retry_black, gentle_mode, auto_repair, color_mode,
+                lock_exposure, exposure_value, lock_wb, wb_temperature, show_overlay, debug_logs, show_boxes, show_native, virtual_cam,
+                swap_mode, fs_model, fs_pixel, fs_weight, ds_model, morph,
+                d_model, d_size, d_score, selector_mode_dd, auto_fallback, l_model, l_score, o_model, p_model,
+                occl_enabled,
+                face_enh_enabled, face_enh_model, face_enh_blend, face_enh_weight,
+                frame_enh_enabled, frame_enh_model, frame_enh_blend, enhance_async,
+                colorizer_enabled, colorizer_model, colorizer_size, colorizer_blend,
+                expr_enabled, expr_model, expr_factor, expr_areas,
+                age_enabled, age_model, age_direction,
+                editor_enabled, editor_model,
+                fe_eyebrow_dir, fe_eye_h, fe_eye_v, fe_eye_open,
+                fe_lip_open, fe_mouth_smile, fe_head_pitch,
+                fe_head_yaw, fe_head_roll,
+                debugger_enabled, dbg_items,
+                lip_enabled, lip_model, lip_weight,
+                source_files,
+            ]
+            for comp in cli_inputs:
+                try:
+                    comp.change(
+                        _build_cli_command,
+                        inputs=cli_inputs,
+                        outputs=cli_box,
+                    )
+                except Exception:
+                    pass
+            # Initialize CLI preview on load
+            demo.load(_build_cli_command, inputs=cli_inputs, outputs=cli_box)
 
             def on_detector_change(model):
                 sizes = detector_sizes_map.get(model, ["640x640"])
@@ -2552,8 +3027,8 @@ def main() -> None:
                 outputs=[exec_provider, exec_device, video_mem, swap_mode, virtual_cam],
             )
 
-            # Launch the GUI
-            demo.launch(server_name="127.0.0.1", server_port=7861, show_error=True, inbrowser=False, share=False)
+            # Launch the GUI (auto-open browser)
+            demo.launch(server_name="127.0.0.1", server_port=7861, show_error=True, inbrowser=True, share=False)
             return
 
 def test_capture(camera_choice, backend_name, dshow_name_text, width, height, convert_rgb_flag, fourcc_name):

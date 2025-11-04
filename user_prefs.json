@@ -1,6 +1,6 @@
 {
-  "swap_mode": "face",
-  "deep_swapper_model": "iperov/rowan_atkinson_224",
+  "swap_mode": "deep",
+  "deep_swapper_model": "iperov/james_carrey_224",
   "face_swapper_model": "inswapper_128",
   "face_swapper_pixel_boost": "128x128",
   "face_swapper_weight": 0.5,
@@ -48,5 +48,8 @@
   "show_native": false,
   "source_paths": [
     "C:\\Users\\razva\\AppData\\Local\\Temp\\gradio\\92d59a9609bb060f65d1dc5eb2cc56842b0aa8c69d4e8573565420bceeb23108\\Clipboard_11-04-2025_01.png"
-  ]
+  ],
+  "width": 1920,
+  "height": 1080,
+  "morph": 100
 }
