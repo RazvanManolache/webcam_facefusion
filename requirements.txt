@@ -1,0 +1,17 @@
+# Core runtime
+numpy>=1.24
+opencv-python>=4.8.0
+onnxruntime>=1.17.0
+
+# UI
+gradio>=4.0.0
+
+# Networking / downloads used by FaceFusion downloader
+requests>=2.31.0
+tqdm>=4.66.0
+
+# Image I/O helpers sometimes used by modules
+Pillow>=10.0.0
+
+# Optional (Windows GPU via DirectML). Install manually if desired.
+# onnxruntime-directml>=1.17.0
