@@ -475,6 +475,19 @@ def draw_info(frame: VisionFrame, info: str, org: Tuple[int, int] = (10, 24)) ->
 def process_frame(frame: VisionFrame, do_swap: bool, show_debug: bool = False, debug_log: bool = False, show_boxes: bool = False) -> VisionFrame:
     if frame is None:
         return None
+    # Real-time toggles: prefer state over passed args to reflect live UI changes
+    try:
+        st_deep = state_manager.get_item('deep_enabled')
+        if isinstance(st_deep, bool):
+            do_swap = st_deep
+    except Exception:
+        pass
+    try:
+        st_boxes = state_manager.get_item('show_boxes')
+        if isinstance(st_boxes, bool):
+            show_boxes = st_boxes
+    except Exception:
+        pass
     # Runtime guard to avoid NoneType margin in face_detector.prepare_margin
     try:
         margin = state_manager.get_item("face_detector_margin")
@@ -1739,6 +1752,32 @@ def main() -> None:
                 except Exception:
                     pass
 
+            def on_face_enh_toggle(flag: bool):
+                try:
+                    state_manager.set_item("face_enhancer_enabled", bool(flag))
+                    if flag:
+                        try:
+                            ff_face_enhancer.pre_check()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            def on_frame_enh_toggle(flag: bool):
+                try:
+                    state_manager.set_item("frame_enhancer_enabled", bool(flag))
+                    if flag:
+                        try:
+                            ff_frame_enhancer.pre_check()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            face_enh_enabled.change(on_face_enh_toggle, inputs=face_enh_enabled, outputs=[])
+            frame_enh_enabled.change(on_frame_enh_toggle, inputs=frame_enh_enabled, outputs=[])
+            enhance_async.change(on_enhance_async_change, inputs=enhance_async, outputs=[])
+
             # Processor option live handlers
             def on_colorizer_model_change(v):
                 try:
@@ -1760,6 +1799,18 @@ def main() -> None:
             colorizer_size.change(on_colorizer_size_change, inputs=colorizer_size, outputs=[])
             colorizer_blend.change(on_colorizer_blend_change, inputs=colorizer_blend, outputs=[])
 
+            def on_colorizer_toggle(flag: bool):
+                try:
+                    state_manager.set_item('frame_colorizer_enabled', bool(flag))
+                    if flag:
+                        try:
+                            ff_frame_colorizer.pre_check()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            colorizer_enabled.change(on_colorizer_toggle, inputs=colorizer_enabled, outputs=[])
+
             def on_expr_model_change(v):
                 try:
                     state_manager.set_item('expression_restorer_model', v)
@@ -1780,6 +1831,18 @@ def main() -> None:
             expr_factor.change(on_expr_factor_change, inputs=expr_factor, outputs=[])
             expr_areas.change(on_expr_areas_change, inputs=expr_areas, outputs=[])
 
+            def on_expr_toggle(flag: bool):
+                try:
+                    state_manager.set_item('expression_restorer_enabled', bool(flag))
+                    if flag:
+                        try:
+                            ff_expr_restorer.pre_check()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            expr_enabled.change(on_expr_toggle, inputs=expr_enabled, outputs=[])
+
             def on_age_model_change(v):
                 try:
                     state_manager.set_item('age_modifier_model', v)
@@ -1793,6 +1856,18 @@ def main() -> None:
                     pass
             age_model.change(on_age_model_change, inputs=age_model, outputs=[])
             age_direction.change(on_age_direction_change, inputs=age_direction, outputs=[])
+
+            def on_age_toggle(flag: bool):
+                try:
+                    state_manager.set_item('age_modifier_enabled', bool(flag))
+                    if flag:
+                        try:
+                            ff_age_modifier.pre_check()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            age_enabled.change(on_age_toggle, inputs=age_enabled, outputs=[])
 
             def on_editor_model_change(v):
                 try:
@@ -1823,6 +1898,13 @@ def main() -> None:
                     pass
             dbg_items.change(on_dbg_items_change, inputs=dbg_items, outputs=[])
 
+            def on_debugger_toggle(flag: bool):
+                try:
+                    state_manager.set_item('face_debugger_enabled', bool(flag))
+                except Exception:
+                    pass
+            debugger_enabled.change(on_debugger_toggle, inputs=debugger_enabled, outputs=[])
+
             def on_lip_model_change(v):
                 try:
                     state_manager.set_item('lip_syncer_model', v)
@@ -1837,6 +1919,63 @@ def main() -> None:
             lip_model.change(on_lip_model_change, inputs=lip_model, outputs=[])
             lip_weight.change(on_lip_weight_change, inputs=lip_weight, outputs=[])
 
+            def on_lip_toggle(flag: bool):
+                try:
+                    state_manager.set_item('lip_syncer_enabled', bool(flag))
+                    if flag:
+                        try:
+                            ff_lip_syncer.pre_check()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            lip_enabled.change(on_lip_toggle, inputs=lip_enabled, outputs=[])
+
+            def on_video_mem_change(v: str):
+                try:
+                    if v in ("strict","moderate","relaxed"):
+                        state_manager.set_item('video_memory_strategy', v)
+                        _cleanup_inference()
+                except Exception:
+                    pass
+            video_mem.change(on_video_mem_change, inputs=video_mem, outputs=[])
+
+            # Live toggles for key flags used per-frame
+            def on_deep_enabled_change(flag: bool):
+                try:
+                    state_manager.set_item('deep_enabled', bool(flag))
+                except Exception:
+                    pass
+            deep_enabled.change(on_deep_enabled_change, inputs=deep_enabled, outputs=[])
+
+            def on_occl_enabled_change(flag: bool):
+                try:
+                    state_manager.set_item('use_occlusion', bool(flag))
+                except Exception:
+                    pass
+            occl_enabled.change(on_occl_enabled_change, inputs=occl_enabled, outputs=[])
+
+            def on_show_boxes_change(flag: bool):
+                try:
+                    state_manager.set_item('show_boxes', bool(flag))
+                except Exception:
+                    pass
+            show_boxes.change(on_show_boxes_change, inputs=show_boxes, outputs=[])
+
+            def on_show_overlay_change(flag: bool):
+                try:
+                    state_manager.set_item('show_overlay', bool(flag))
+                except Exception:
+                    pass
+            show_overlay.change(on_show_overlay_change, inputs=show_overlay, outputs=[])
+
+            def on_debug_logs_change(flag: bool):
+                try:
+                    state_manager.set_item('debug_logs', bool(flag))
+                except Exception:
+                    pass
+            debug_logs.change(on_debug_logs_change, inputs=debug_logs, outputs=[])
+
             # Additional live-change handlers for swapper/enhancers
             def on_swap_mode_change(mode: str):
                 try:
@@ -1845,6 +1984,8 @@ def main() -> None:
                     return gr.update(value=(mode == 'deep'))
                 except Exception:
                     return gr.update()
+
+            swap_mode.change(on_swap_mode_change, inputs=swap_mode, outputs=deep_enabled)
 
             def on_source_files_change(files):
                 try:
