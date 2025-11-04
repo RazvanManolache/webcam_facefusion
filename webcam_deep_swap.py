@@ -31,9 +31,20 @@ from facefusion.processors.modules.face_swapper import core as ff_face_swapper
 from facefusion.processors.modules.face_enhancer import core as ff_face_enhancer
 from facefusion.processors.modules.frame_enhancer import core as ff_frame_enhancer
 from facefusion.processors.modules.frame_colorizer import core as ff_frame_colorizer
+from facefusion.processors.modules.expression_restorer import core as ff_expr_restorer
+from facefusion.processors.modules.age_modifier import core as ff_age_modifier
+from facefusion.processors.modules.face_editor import core as ff_face_editor
+from facefusion.processors.modules.face_debugger import core as ff_face_debugger
+from facefusion.processors.modules.lip_syncer import core as ff_lip_syncer
 from facefusion import choices as ff_choices
 from facefusion.processors import choices as proc_choices
 from facefusion.processors import choices as proc_choices
+from facefusion.processors.modules.frame_colorizer import choices as frame_colorizer_choices
+from facefusion.processors.modules.expression_restorer import choices as expression_restorer_choices
+from facefusion.processors.modules.age_modifier import choices as age_modifier_choices
+from facefusion.processors.modules.face_editor import choices as face_editor_choices
+from facefusion.processors.modules.face_debugger import choices as face_debugger_choices
+from facefusion.processors.modules.lip_syncer import choices as lip_syncer_choices
 from facefusion import face_detector as ff_detector
 from facefusion import face_landmarker as ff_landmarker
 from facefusion import face_masker as ff_masker
@@ -623,6 +634,88 @@ def process_frame(frame: VisionFrame, do_swap: bool, show_debug: bool = False, d
                     except Exception:
                         pass
                     out = ff_frame_colorizer.colorize_frame(out)
+                if state_manager.get_item('expression_restorer_enabled'):
+                    try:
+                        ff_expr_restorer.pre_check()
+                    except Exception:
+                        pass
+                    try:
+                        res = ff_expr_restorer.process_frame({
+                            'reference_vision_frame': frame,
+                            'target_vision_frame': frame,
+                            'temp_vision_frame': out,
+                        })
+                        if isinstance(res, tuple) and len(res) > 0:
+                            out = res[0]
+                        elif isinstance(res, np.ndarray):
+                            out = res
+                    except Exception:
+                        pass
+                if state_manager.get_item('age_modifier_enabled'):
+                    try:
+                        ff_age_modifier.pre_check()
+                    except Exception:
+                        pass
+                    try:
+                        res = ff_age_modifier.process_frame({
+                            'reference_vision_frame': frame,
+                            'target_vision_frame': frame,
+                            'temp_vision_frame': out,
+                        })
+                        if isinstance(res, tuple) and len(res) > 0:
+                            out = res[0]
+                        elif isinstance(res, np.ndarray):
+                            out = res
+                    except Exception:
+                        pass
+                if state_manager.get_item('face_editor_enabled'):
+                    try:
+                        ff_face_editor.pre_check()
+                    except Exception:
+                        pass
+                    try:
+                        res = ff_face_editor.process_frame({
+                            'reference_vision_frame': frame,
+                            'target_vision_frame': frame,
+                            'temp_vision_frame': out,
+                        })
+                        if isinstance(res, tuple) and len(res) > 0:
+                            out = res[0]
+                        elif isinstance(res, np.ndarray):
+                            out = res
+                    except Exception:
+                        pass
+                if state_manager.get_item('lip_syncer_enabled'):
+                    try:
+                        ff_lip_syncer.pre_check()
+                    except Exception:
+                        pass
+                    try:
+                        res = ff_lip_syncer.process_frame({
+                            'reference_vision_frame': frame,
+                            'source_voice_frame': None,
+                            'target_vision_frame': frame,
+                            'temp_vision_frame': out,
+                        })
+                        if isinstance(res, tuple) and len(res) > 0:
+                            out = res[0]
+                        elif isinstance(res, np.ndarray):
+                            out = res
+                    except Exception:
+                        pass
+                if state_manager.get_item('face_debugger_enabled'):
+                    try:
+                        res = ff_face_debugger.process_frame({
+                            'reference_vision_frame': frame,
+                            'target_vision_frame': frame,
+                            'temp_vision_frame': out,
+                        })
+                        if isinstance(res, tuple) and len(res) > 0:
+                            out = res[0]
+                        elif isinstance(res, np.ndarray):
+                            out = res
+                    except Exception:
+                        pass
             except Exception:
                 pass
             if show_debug:
@@ -1490,12 +1583,40 @@ def main() -> None:
                 with gr.Tab("Processors"):
                     with gr.Row():
                         colorizer_enabled = gr.Checkbox(value=False, label="Enable Frame Colorizer")
+                        colorizer_model = gr.Dropdown(choices=frame_colorizer_choices.frame_colorizer_models, value=(frame_colorizer_choices.frame_colorizer_models[0] if frame_colorizer_choices.frame_colorizer_models else None), label="Colorizer Model")
+                        colorizer_size = gr.Dropdown(choices=frame_colorizer_choices.frame_colorizer_sizes, value=(frame_colorizer_choices.frame_colorizer_sizes[0] if frame_colorizer_choices.frame_colorizer_sizes else None), label="Colorizer Size")
+                        colorizer_blend = gr.Slider(minimum=min(frame_colorizer_choices.frame_colorizer_blend_range), maximum=max(frame_colorizer_choices.frame_colorizer_blend_range), step=1, value=100, label="Colorizer Blend")
+                    with gr.Row():
                         expr_enabled = gr.Checkbox(value=False, label="Enable Expression Restorer")
+                        expr_model = gr.Dropdown(choices=expression_restorer_choices.expression_restorer_models, value=(expression_restorer_choices.expression_restorer_models[0] if expression_restorer_choices.expression_restorer_models else None), label="Expr Model")
+                        expr_factor = gr.Slider(minimum=min(expression_restorer_choices.expression_restorer_factor_range), maximum=max(expression_restorer_choices.expression_restorer_factor_range), step=1, value=80, label="Expr Factor")
+                        expr_areas = gr.CheckboxGroup(choices=expression_restorer_choices.expression_restorer_areas, value=expression_restorer_choices.expression_restorer_areas, label="Expr Areas")
+                    with gr.Row():
                         age_enabled = gr.Checkbox(value=False, label="Enable Age Modifier")
+                        age_model = gr.Dropdown(choices=age_modifier_choices.age_modifier_models, value=(age_modifier_choices.age_modifier_models[0] if age_modifier_choices.age_modifier_models else None), label="Age Model")
+                        age_direction = gr.Slider(minimum=min(age_modifier_choices.age_modifier_direction_range), maximum=max(age_modifier_choices.age_modifier_direction_range), step=1, value=0, label="Age Direction")
                     with gr.Row():
                         editor_enabled = gr.Checkbox(value=False, label="Enable Face Editor")
+                        editor_model = gr.Dropdown(choices=face_editor_choices.face_editor_models, value=(face_editor_choices.face_editor_models[0] if face_editor_choices.face_editor_models else None), label="Editor Model")
+                    with gr.Row():
+                        fe_eyebrow_dir = gr.Slider(minimum=min(face_editor_choices.face_editor_eyebrow_direction_range), maximum=max(face_editor_choices.face_editor_eyebrow_direction_range), step=0.1, value=0.0, label="Eyebrow Direction")
+                        fe_eye_h = gr.Slider(minimum=min(face_editor_choices.face_editor_eye_gaze_horizontal_range), maximum=max(face_editor_choices.face_editor_eye_gaze_horizontal_range), step=0.1, value=0.0, label="Eye Gaze H")
+                        fe_eye_v = gr.Slider(minimum=min(face_editor_choices.face_editor_eye_gaze_vertical_range), maximum=max(face_editor_choices.face_editor_eye_gaze_vertical_range), step=0.1, value=0.0, label="Eye Gaze V")
+                        fe_eye_open = gr.Slider(minimum=min(face_editor_choices.face_editor_eye_open_ratio_range), maximum=max(face_editor_choices.face_editor_eye_open_ratio_range), step=0.1, value=0.0, label="Eye Open")
+                    with gr.Row():
+                        fe_lip_open = gr.Slider(minimum=min(face_editor_choices.face_editor_lip_open_ratio_range), maximum=max(face_editor_choices.face_editor_lip_open_ratio_range), step=0.1, value=0.0, label="Lip Open")
+                        fe_mouth_smile = gr.Slider(minimum=min(face_editor_choices.face_editor_mouth_smile_range), maximum=max(face_editor_choices.face_editor_mouth_smile_range), step=0.1, value=0.0, label="Smile")
+                        fe_head_pitch = gr.Slider(minimum=min(face_editor_choices.face_editor_head_pitch_range), maximum=max(face_editor_choices.face_editor_head_pitch_range), step=0.1, value=0.0, label="Head Pitch")
+                    with gr.Row():
+                        fe_head_yaw = gr.Slider(minimum=min(face_editor_choices.face_editor_head_yaw_range), maximum=max(face_editor_choices.face_editor_head_yaw_range), step=0.1, value=0.0, label="Head Yaw")
+                        fe_head_roll = gr.Slider(minimum=min(face_editor_choices.face_editor_head_roll_range), maximum=max(face_editor_choices.face_editor_head_roll_range), step=0.1, value=0.0, label="Head Roll")
+                    with gr.Row():
                         debugger_enabled = gr.Checkbox(value=False, label="Enable Face Debugger")
+                        dbg_items = gr.CheckboxGroup(choices=face_debugger_choices.face_debugger_items, value=['face-landmark-5/68','face-mask'], label="Debugger Items")
+                    with gr.Row():
                         lip_enabled = gr.Checkbox(value=False, label="Enable Lip Syncer")
+                        lip_model = gr.Dropdown(choices=lip_syncer_choices.lip_syncer_models, value=(lip_syncer_choices.lip_syncer_models[0] if lip_syncer_choices.lip_syncer_models else None), label="Lip Model")
+                        lip_weight = gr.Slider(minimum=min(lip_syncer_choices.lip_syncer_weight_range), maximum=max(lip_syncer_choices.lip_syncer_weight_range), step=0.05, value=0.5, label="Lip Weight")
             with gr.Row():
                 start_btn = gr.Button("Start")
                 stop_btn = gr.Button("Stop")
@@ -1617,6 +1738,104 @@ def main() -> None:
                     state_manager.set_item("enhance_async", bool(flag))
                 except Exception:
                     pass
+
+            # Processor option live handlers
+            def on_colorizer_model_change(v):
+                try:
+                    state_manager.set_item('frame_colorizer_model', v)
+                    ff_frame_colorizer.pre_check()
+                except Exception:
+                    pass
+            def on_colorizer_size_change(v):
+                try:
+                    state_manager.set_item('frame_colorizer_size', v)
+                except Exception:
+                    pass
+            def on_colorizer_blend_change(v):
+                try:
+                    state_manager.set_item('frame_colorizer_blend', int(v))
+                except Exception:
+                    pass
+            colorizer_model.change(on_colorizer_model_change, inputs=colorizer_model, outputs=[])
+            colorizer_size.change(on_colorizer_size_change, inputs=colorizer_size, outputs=[])
+            colorizer_blend.change(on_colorizer_blend_change, inputs=colorizer_blend, outputs=[])
+
+            def on_expr_model_change(v):
+                try:
+                    state_manager.set_item('expression_restorer_model', v)
+                    ff_expr_restorer.pre_check()
+                except Exception:
+                    pass
+            def on_expr_factor_change(v):
+                try:
+                    state_manager.set_item('expression_restorer_factor', int(v))
+                except Exception:
+                    pass
+            def on_expr_areas_change(v):
+                try:
+                    state_manager.set_item('expression_restorer_areas', v)
+                except Exception:
+                    pass
+            expr_model.change(on_expr_model_change, inputs=expr_model, outputs=[])
+            expr_factor.change(on_expr_factor_change, inputs=expr_factor, outputs=[])
+            expr_areas.change(on_expr_areas_change, inputs=expr_areas, outputs=[])
+
+            def on_age_model_change(v):
+                try:
+                    state_manager.set_item('age_modifier_model', v)
+                    ff_age_modifier.pre_check()
+                except Exception:
+                    pass
+            def on_age_direction_change(v):
+                try:
+                    state_manager.set_item('age_modifier_direction', int(v))
+                except Exception:
+                    pass
+            age_model.change(on_age_model_change, inputs=age_model, outputs=[])
+            age_direction.change(on_age_direction_change, inputs=age_direction, outputs=[])
+
+            def on_editor_model_change(v):
+                try:
+                    state_manager.set_item('face_editor_model', v)
+                    ff_face_editor.pre_check()
+                except Exception:
+                    pass
+            editor_model.change(on_editor_model_change, inputs=editor_model, outputs=[])
+            def _set_float(key, v):
+                try:
+                    state_manager.set_item(key, float(v))
+                except Exception:
+                    pass
+            fe_eyebrow_dir.change(lambda v: _set_float('face_editor_eyebrow_direction', v), inputs=fe_eyebrow_dir, outputs=[])
+            fe_eye_h.change(lambda v: _set_float('face_editor_eye_gaze_horizontal', v), inputs=fe_eye_h, outputs=[])
+            fe_eye_v.change(lambda v: _set_float('face_editor_eye_gaze_vertical', v), inputs=fe_eye_v, outputs=[])
+            fe_eye_open.change(lambda v: _set_float('face_editor_eye_open_ratio', v), inputs=fe_eye_open, outputs=[])
+            fe_lip_open.change(lambda v: _set_float('face_editor_lip_open_ratio', v), inputs=fe_lip_open, outputs=[])
+            fe_mouth_smile.change(lambda v: _set_float('face_editor_mouth_smile', v), inputs=fe_mouth_smile, outputs=[])
+            fe_head_pitch.change(lambda v: _set_float('face_editor_head_pitch', v), inputs=fe_head_pitch, outputs=[])
+            fe_head_yaw.change(lambda v: _set_float('face_editor_head_yaw', v), inputs=fe_head_yaw, outputs=[])
+            fe_head_roll.change(lambda v: _set_float('face_editor_head_roll', v), inputs=fe_head_roll, outputs=[])
+
+            def on_dbg_items_change(v):
+                try:
+                    state_manager.set_item('face_debugger_items', v)
+                except Exception:
+                    pass
+            dbg_items.change(on_dbg_items_change, inputs=dbg_items, outputs=[])
+
+            def on_lip_model_change(v):
+                try:
+                    state_manager.set_item('lip_syncer_model', v)
+                    ff_lip_syncer.pre_check()
+                except Exception:
+                    pass
+            def on_lip_weight_change(v):
+                try:
+                    state_manager.set_item('lip_syncer_weight', float(v))
+                except Exception:
+                    pass
+            lip_model.change(on_lip_model_change, inputs=lip_model, outputs=[])
+            lip_weight.change(on_lip_weight_change, inputs=lip_weight, outputs=[])
 
             # Additional live-change handlers for swapper/enhancers
             def on_swap_mode_change(mode: str):
