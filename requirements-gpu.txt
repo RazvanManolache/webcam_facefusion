@@ -1,12 +1,24 @@
 # Core runtime (GPU build of ONNX Runtime for CUDA)
 # NOTE: Do not install both onnxruntime and onnxruntime-gpu together.
-onnxruntime-gpu>=1.17.0
+onnxruntime-gpu==1.23.2
+
+# ONNX Runtime 1.23 expects TensorRT major version 10. The explicit CUDA 12
+# package coexists with a newer system CUDA toolkit and supplies nvinfer_10.dll.
+tensorrt-cu12==10.9.0.34
+
+# CUDA image pipeline and ONNX Runtime I/O binding buffers.
+torch==2.8.0
 
 # The rest mirrors requirements.txt
 numpy>=1.24
 opencv-python>=4.8.0
 
-# UI
+# Web application and API (React files are built with Node.js)
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-multipart>=0.0.20
+
+# Legacy fallback UI
 gradio>=4.0.0
 
 # Networking / downloads used by FaceFusion downloader
@@ -15,3 +27,6 @@ tqdm>=4.66.0
 
 # Image I/O helpers sometimes used by modules
 Pillow>=10.0.0
+pyvirtualcam>=0.14
+pystray>=0.19.5
+psutil>=5.9.0
