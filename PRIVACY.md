@@ -13,4 +13,4 @@ These paths are excluded by `.gitignore`. Do not force-add them. Before publishi
 
 Guided identity and DFM capture requires explicit consent in the UI. Captured identity datasets remain under `.assets/` unless the operator intentionally exports them. They must never be committed to the source repository.
 
-The sanitized public-release branch vendors the required `facefusion_mrg` source directly. This keeps the release self-contained and avoids publishing personal submodule history or depending on a private or disabled fork.
+The public repository vendors the required `facefusion_mrg` source directly. This keeps the release self-contained and avoids publishing personal submodule history or depending on a private or disabled fork.
